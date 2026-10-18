@@ -1912,3 +1912,97 @@ fn test_release_issue_with_admin_as_recipient() {
     let distributable = 950_0000000i128; // after 5% fee
     assert_eq!(token_client.balance(&admin), distributable);
 }
+// ── Regression #471 (closed #307) ─────────────────────────────────────────
+// initialize must reject treasury == contract address with InvalidTreasury.
+#[test]
+fn test_initialize_rejects_treasury_equal_to_contract_address() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let err = client.try_initialize(&admin, &oracle, &contract_id, &500u32, &None, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidTreasury)));
+}
+
+// ── Regression #477 (closed #340) ─────────────────────────────────────────
+// initialize must accept fee_bps == 10_000 (inclusive upper bound).
+#[test]
+fn test_initialize_accepts_fee_bps_at_boundary_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin, &oracle, &treasury, &10_000u32, &None, &None);
+    assert_eq!(client.get_fee_bps(), 10_000u32);
+
+#[test]
+fn test_keep_alive_succeeds_on_existing_milestone() {
+    // Regression for #475: milestones::keep_alive must not error on a valid milestone.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &100_0000000i128);
+    client.create_milestone(&700u64, &sponsor, &token_addr, &100_0000000i128, &9999u64);
+
+    // keep_alive is permissionless and must return Ok(()).
+    client.keep_alive(&700u64);
+}
+
+#[test]
+fn test_keep_alive_fails_on_nonexistent_milestone() {
+    // Regression for #475: keep_alive on an unknown milestone_id must return MilestoneNotFound.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let err = client.try_keep_alive(&9999u64);
+    assert_eq!(err, Err(Ok(Error::MilestoneNotFound)));
+// ── Regression: issue #491 ────────────────────────────────────────────────────
+
+#[test]
+fn test_create_milestone_rejects_deadline_in_past() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Advance ledger time so a deadline of 0 (or any value ≤ now) is clearly in the past.
+    env.ledger().set_timestamp(1_000u64);
+
+    let (_admin, _treasury, client) = setup(&env);
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000_000_000i128);
+
+    // deadline == now: must be rejected
+    let err = client.try_create_milestone(&1u64, &sponsor, &token_addr, &10_000_000_000i128, &1_000u64);
+    assert_eq!(err, Err(Ok(Error::DeadlineInPast)));
+
+    // deadline strictly in the future: must succeed
+    client.create_milestone(&2u64, &sponsor, &token_addr, &10_000_000_000i128, &2_000u64);
+}
+
+#[test]
+fn test_create_milestone_accepts_future_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(500u64);
+
+    let (_admin, _treasury, client) = setup(&env);
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &1_000i128);
+
+    // deadline = 501 > 500: must succeed
+    client.create_milestone(&1u64, &sponsor, &token_addr, &1_000i128, &501u64);
+}

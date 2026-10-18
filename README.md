@@ -153,15 +153,21 @@ fn extend_deadline(env, issue_id: u64, caller: Address, new_deadline: u64) -> Re
 fn keep_alive(env, issue_id: u64) -> Result<(), Error>;
 fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
 fn get_escrow(env, issue_id: u64) -> Result<Escrow, Error>;
 fn get_contribution(env, issue_id: u64, index: u32) -> Result<Contribution, Error>;
+fn get_contributions(env, issue_id: u64) -> Result<Vec<Contribution>, Error>;
 fn get_admin(env) -> Result<Address, Error>;
 fn get_oracle(env) -> Result<Address, Error>;
 fn get_treasury(env) -> Result<Address, Error>;
 fn get_fee_bps(env) -> Result<u32, Error>;
+fn set_fee_bps(env, new_fee_bps: u32) -> Result<(), Error>;
 fn get_version(env) -> u32;
 fn get_max_sponsors(env) -> Result<u32, Error>;
+fn set_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
 ```
 
 - `fund`: `sponsor.require_auth()`. Transfers `amount` of `token` from the
@@ -229,18 +235,30 @@ fn initialize(env, admin: Address, oracle: Address, treasury: Address, fee_bps: 
 fn create_milestone(env, milestone_id: u64, sponsor: Address, token: Address, total_budget: i128) -> Result<(), Error>;
 fn contribute(env, milestone_id: u64, sponsor: Address, amount: i128) -> Result<(), Error>;
 fn allocate(env, milestone_id: u64, issue_id: u64, amount: i128) -> Result<(), Error>;
+fn deallocate(env, milestone_id: u64, issue_id: u64) -> Result<(), Error>;
 fn release_issue(env, milestone_id: u64, issue_id: u64, recipients: Vec<(Address, u32)>) -> Result<(), Error>;
 fn cancel_milestone(env, milestone_id: u64) -> Result<(), Error>;
+fn cancel_milestone_after_deadline(env, milestone_id: u64) -> Result<(), Error>;
+fn keep_alive(env, milestone_id: u64) -> Result<(), Error>;
 fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
 fn get_milestone(env, milestone_id: u64) -> Result<Milestone, Error>;
 fn get_issue_status(env, milestone_id: u64, issue_id: u64) -> Result<IssueStatus, Error>;
 fn get_contribution(env, milestone_id: u64, index: u32) -> Result<Contribution, Error>;
+fn get_contributions(env, milestone_id: u64) -> Result<Vec<Contribution>, Error>;
 fn get_admin(env) -> Result<Address, Error>;
 fn get_oracle(env) -> Result<Address, Error>;
+fn get_treasury(env) -> Result<Address, Error>;
+fn get_fee_bps(env) -> Result<u32, Error>;
+fn set_fee_bps(env, new_fee_bps: u32) -> Result<(), Error>;
 fn get_version(env) -> u32;
 fn get_max_sponsors(env) -> Result<u32, Error>;
+fn set_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
 ```
 
 - `create_milestone`: the original sponsor deposits `total_budget` once;
@@ -290,8 +308,10 @@ fn deposit(env, pool_id: u64, sponsor: Address, token: Address, amount: i128) ->
 fn withdraw(env, pool_id: u64, recipient: Address, amount: i128) -> Result<(), Error>;
 fn reclaim_deposit(env, pool_id: u64, deposit_index: u32, sponsor: Address) -> Result<(), Error>;
 fn keep_alive(env, pool_id: u64) -> Result<(), Error>;
+fn sweep(env, pool_id: u64, recipient: Address) -> Result<(), Error>;
 fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
 fn get_pool(env, pool_id: u64) -> Result<MaintenancePool, Error>;
 fn get_deposit(env, pool_id: u64, index: u32) -> Result<Deposit, Error>;
@@ -300,6 +320,13 @@ fn get_oracle(env) -> Result<Address, Error>;
 fn get_treasury(env) -> Result<Address, Error>;
 fn get_fee_bps(env) -> Result<u32, Error>;
 fn get_version(env) -> u32;
+fn set_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_oracle(env, new_oracle: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
+fn recover_admin(env, new_admin: Address) -> Result<(), Error>;
+fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
+fn is_paused_view(env) -> bool;
 ```
 
 - `pool_id` is an off-chain-assigned identifier for a repo or org (e.g. a
@@ -315,6 +342,14 @@ fn get_version(env) -> u32;
   merge the way escrow/milestones are; it's off-chain-adjudicated
   "maintenance credit"). Deducts the fee, rejects if `amount` exceeds the
   pool's current balance (`InsufficientBalance`).
+- `recover_admin`: recovery-address-only — if a `recovery` address was
+  supplied at `initialize`, that address may appoint a new admin. Covers
+  the "admin key permanently lost" scenario without requiring an upgrade.
+- `set_treasury`: admin-only — updates the treasury address that receives
+  the protocol fee on each `withdraw` call.
+- `is_paused_view`: read-only — returns `true` when the contract is
+  paused (i.e. `pause` has been called and `unpause` has not). Unlike
+  `pause`/`unpause` this does not require admin authorization.
 
 ## Data models
 
@@ -358,7 +393,7 @@ pub struct MaintenancePool {
     pub total_deposited: i128,
     pub total_withdrawn: i128,
     pub created_at: u64,
-    pub deposit_count: u32, // capped at u32::MAX (checked_add)
+    pub deposit_count: u32, // capped at MAX_DEPOSITS (50); further deposits rejected with DepositCountOverflow
 }
 pub struct Deposit {
     pub sponsor: Address,
@@ -371,8 +406,9 @@ Each contract's config (`Admin`, `Treasury`, `FeeBps`) lives in **instance
 storage** (small, always loaded with the contract). Per-issue/milestone/pool
 records live in **persistent storage** keyed by an enum (`DataKey`) so they
 survive independently and can be individually TTL-extended. The `deposit_count`
-in `MaintenancePool` is capped at `u32::MAX` to prevent overflow; further deposits
-are rejected with a typed `DepositCountOverflow` error.
+in `MaintenancePool` is capped at `MAX_DEPOSITS` (50) to bound the cost of
+per-deposit iteration loops; further deposits are rejected with a typed
+`DepositCountOverflow` error.
 
 ### Storage & TTL
 
@@ -495,9 +531,12 @@ integration points:
 
 1. **On issue funded (Stellar payment observed / sponsor UI flow):**
    nothing to do here — `fund`/`create_milestone`/`deposit` are called
-   directly by the sponsor's wallet, not by the backend. The backend just
-   indexes the resulting contract events / `get_escrow` state to reflect
-   funding status in the product UI.
+   directly by the sponsor's wallet, not by the backend. The backend
+   tracks funding status by polling the `get_escrow` / `get_milestone` /
+   `get_pool` view functions (free simulated calls — no signing or fee
+   required) and/or by streaming the contract's diagnostic events from a
+   Soroban RPC event subscription. The view-function path is authoritative
+   — events are best-effort delivery and may be pruned by the RPC node.
 2. **On PR merged (GitHub webhook):** backend resolves which
    `issue_id`/`milestone_id` the merged PR is tied to, resolves the
    contributor(s) and their split (single payee, or a team split it

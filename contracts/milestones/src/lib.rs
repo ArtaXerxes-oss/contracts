@@ -121,6 +121,14 @@ mod contract {
             return Err(Error::InvalidAmount);
         }
 
+        // Reject a deadline that is already in the past: cancel_milestone_after_deadline
+        // becomes callable by anyone as soon as deadline + GRACE_PERIOD elapses, so a
+        // stale / zero deadline makes that permissionless path immediately reachable
+        // (issue #491 — same gap as escrow's issue #21).
+        if deadline <= env.ledger().timestamp() {
+            return Err(Error::DeadlineInPast);
+        }
+
         let key = DataKey::Milestone(milestone_id);
         if let Some(existing) = env.storage().persistent().get::<_, Milestone>(&key) {
             if !existing.closed {
@@ -330,6 +338,17 @@ mod contract {
         if milestone.closed {
             return Err(Error::MilestoneClosed);
         }
+
+        // Reject allocations once the milestone's deadline has passed (#489).
+        // Once `now >= deadline` sponsors can trigger `cancel_milestone_after_deadline`
+        // after the grace period; allowing allocations beyond the deadline lets the
+        // admin pre-empt that cancel by moving remaining_budget into allocations that
+        // the permissionless cancel cannot sweep.
+        let now = env.ledger().timestamp();
+        if now >= milestone.deadline {
+            return Err(Error::DeadlinePassed);
+        }
+
         if milestone.allocations.contains_key(issue_id) {
             return Err(Error::IssueAlreadyAllocated);
         }
@@ -416,7 +435,8 @@ mod contract {
                 mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
                 mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
             })?;
-        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env).unwrap();
+        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env)
+            .ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &milestone.token);
         let contract_address = env.current_contract_address();
 
@@ -655,6 +675,15 @@ mod contract {
         // they can't archive independently while the milestone stays live.
         for i in 0..milestone.contributor_count {
             extend_ttl(&env, &DataKey::Contribution(milestone_id, i));
+        }
+
+        // Keep every IssueStatus record alive: an allocated issue whose TTL
+        // lapses independently of the parent milestone would appear
+        // "unallocated" to release_issue even though the milestone still has
+        // the allocation entry — the two records would be permanently out of
+        // sync. Refreshing them here closes that window. (#490)
+        for issue_id in milestone.allocations.keys() {
+            extend_ttl(&env, &DataKey::IssueStatus(milestone_id, issue_id));
         }
 
         Ok(())

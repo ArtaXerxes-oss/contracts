@@ -66,7 +66,9 @@ export const errorMappings = {
     11: "NotDepositSponsor",
     12: "DepositNotFound",
     13: "ContractPaused",
-    14: "DepositCountOverflow"
+    14: "DepositCountOverflow",
+    15: "TooManyDeposits",
+    16: "ArithmeticOverflow"
   }
 };
 
@@ -98,11 +100,10 @@ export function extractErrorCode(error) {
     }
     
     // Pattern 2: Look for error codes in strings like "error: 5" or "code: 5"
-    const match = error.match(/error\s*code\s*[:=]?\s*(\d+)/i) || 
+    const match = error.match(/error\s*code\s*[:=]?\s*(\d+)/i) ||
                   error.match(/\bcode\s*[:=]?\s*(\d+)/i) ||
                   error.match(/\berror\s*[:=]?\s*(\d+)/i) ||
-                  error.match(/\bvalue\s*[:=]?\s*(\d+)/i) ||
-                  error.match(/\b(\d+)\b/);
+                  error.match(/\bvalue\s*[:=]?\s*(\d+)/i);
     if (match) {
       return parseInt(match[1], 10);
     }
@@ -172,12 +173,6 @@ export function extractErrorCode(error) {
     if (jsonMatch) {
       return parseInt(jsonMatch[1], 10);
     }
-    
-    // General number extraction as fallback
-    const match = str.match(/\b(\d+)\b/);
-    if (match) {
-      return parseInt(match[1], 10);
-    }
   } catch (e) {
     // Ignore JSON stringify errors
   }
@@ -207,11 +202,17 @@ export function decodeErrorCode(errorCode) {
 /**
  * Format error with decoded meanings if available.
  * @param {any} error - The original error object
+ * @param {string} [contractName] - Optional contract name to narrow the decoded meanings
  * @returns {string} - Formatted error message with decoding
  */
-export function formatError(error) {
+export function formatError(error, contractName) {
   const errorCode = extractErrorCode(error);
-  const decoded = decodeErrorCode(errorCode);
+  const allDecoded = decodeErrorCode(errorCode);
+  // When a contract name is supplied narrow to that contract's entry so the
+  // caller isn't shown irrelevant meanings from sibling contracts.
+  const decoded = contractName
+    ? allDecoded.filter((m) => m.startsWith(contractName + ":"))
+    : allDecoded;
   
   let message = '';
   

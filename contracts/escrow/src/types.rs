@@ -44,6 +44,7 @@ pub struct Contribution {
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
+    Recovery,
     Oracle, // NEW: Oracle role for release operations
     Treasury,
     FeeBps,
