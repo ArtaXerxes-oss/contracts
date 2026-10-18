@@ -5,7 +5,7 @@
   "description": "Deploy/invoke helper scripts for the MergeFi Soroban contracts, used when stellar-cli's own network client can't reach the RPC endpoint.",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=22.12.0"
   },
   "type": "module",
   "scripts": {
