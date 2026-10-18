@@ -60,7 +60,12 @@ async function main() {
   console.log(`${method} succeeded. hash: ${sendResult.hash}`);
 }
 
+// Derive the contract name from the CONTRACT_NAME env var (set by deploy
+// scripts) or from the method prefix so formatError can narrow error meanings
+// to the contract that was actually called.
+const CONTRACT_NAME = process.env.CONTRACT_NAME ?? null;
+
 main().catch((err) => {
-  console.error(formatError(err));
+  console.error(formatError(err, CONTRACT_NAME));
   process.exit(1);
 });

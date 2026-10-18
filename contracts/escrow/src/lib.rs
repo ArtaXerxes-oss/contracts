@@ -59,6 +59,7 @@ mod contract {
         treasury: Address,
         fee_bps: u32,
         max_sponsors: Option<u32>,
+        recovery: Option<Address>,
     ) -> Result<(), Error> {
         admin.require_auth();
         oracle.require_auth();
@@ -84,6 +85,9 @@ mod contract {
             .instance()
             .set(&DataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&DataKey::Paused, &false);
+        if let Some(r) = recovery {
+            env.storage().instance().set(&DataKey::Recovery, &r);
+        }
         extend_instance_ttl(&env);
         Ok(())
     }
@@ -332,7 +336,8 @@ mod contract {
                 mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
                 mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
             })?;
-        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env).unwrap();
+        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env)
+            .ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &escrow.token);
         let contract_address = env.current_contract_address();
 
@@ -635,6 +640,23 @@ mod contract {
 
         new_admin.require_auth();
 
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Recovery-authorized admin rotation: if a recovery address was stored at
+    /// initialize time, that address may appoint a new admin without the
+    /// current admin's key — covering the "admin key permanently lost" scenario.
+    /// Mirrors the same function in the milestones and maintenance-pool contracts.
+    pub fn recover_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        let recovery: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Recovery)
+            .ok_or(Error::NotInitialized)?;
+        recovery.require_auth();
+        new_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         extend_instance_ttl(&env);
         Ok(())

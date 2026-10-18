@@ -16,7 +16,7 @@ mod types;
 mod test;
 
 use error::Error;
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec};
 use types::{DataKey, Deposit, MaintenancePool};
 
 use mergefi_common::BPS_DENOMINATOR;
@@ -178,11 +178,17 @@ mod contract {
         Ok(())
     }
 
-    /// Admin-only: pays `amount` (minus the protocol fee) out of the pool
-    /// to `recipient` (a maintainer), as authorized off-chain by the
-    /// backend oracle for completed maintenance work. Rejects if the pool
-    /// balance is insufficient.
-    pub fn withdraw(env: Env, pool_id: u64, recipient: Address, amount: i128) -> Result<(), Error> {
+    /// Oracle-authorized: pays `amount` out of the pool, split across
+    /// `recipients` (basis-points weights summing to 10 000) after
+    /// deducting the protocol fee via `mergefi_common::compute_split`
+    /// — the same path escrow and milestones use (#483, #484).
+    /// Rejects if the pool balance is insufficient.
+    pub fn withdraw(
+        env: Env,
+        pool_id: u64,
+        recipients: Vec<(Address, u32)>,
+        amount: i128,
+    ) -> Result<(), Error> {
         if is_paused(&env) {
             return Err(Error::ContractPaused);
         }
@@ -206,15 +212,17 @@ mod contract {
 
         let fee_bps: u32 = mergefi_common::get_fee_bps::<DataKey>(&env)
             .ok_or(Error::NotInitialized)?;
-        let fee = amount
-            .checked_mul(fee_bps as i128)
-            .ok_or(Error::ArithmeticOverflow)?
-            / BPS_DENOMINATOR;
-        let payout = amount
-            .checked_sub(fee)
-            .ok_or(Error::ArithmeticOverflow)?;
+        let payouts =
+            mergefi_common::compute_split(&env, amount, fee_bps, &recipients).map_err(
+                |e| match e {
+                    mergefi_common::SplitError::InvalidSplit => Error::InvalidSplit,
+                    mergefi_common::SplitError::SelfPayout => Error::SelfPayout,
+                    mergefi_common::SplitError::Overflow => Error::ArithmeticOverflow,
+                },
+            )?;
 
-        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env).unwrap();
+        let treasury: Address = mergefi_common::require_treasury::<DataKey>(&env)
+            .ok_or(Error::NotInitialized)?;
         let token_client = token::Client::new(&env, &pool.token);
         let contract_address = env.current_contract_address();
 
@@ -230,10 +238,14 @@ mod contract {
         env.storage().persistent().set(&pkey, &pool);
         extend_ttl(&env, &pkey);
 
-        if fee > 0 {
-            token_client.transfer(&contract_address, &treasury, &fee);
+        if payouts.fee > 0 {
+            token_client.transfer(&contract_address, &treasury, &payouts.fee);
         }
-        token_client.transfer(&contract_address, &recipient, &payout);
+        for (recipient, share) in payouts.shares.iter() {
+            if share > 0 {
+                token_client.transfer(&contract_address, &recipient, &share);
+            }
+        }
 
         // Refresh all deposit sub-records on every withdrawal so historical
         // deposit records stay queryable across a long-running pool's lifetime.
@@ -299,16 +311,39 @@ mod contract {
             return Err(Error::InactivityWindowNotElapsed);
         }
 
+        // Reject a second reclaim before any other check so we never
+        // transfer from a zeroed record (#479).
+        if deposit.amount == 0 {
+            return Err(Error::AlreadyReclaimed);
+        }
+
         if deposit.amount > pool.balance {
             return Err(Error::InsufficientBalance);
         }
 
+        let transfer_amount = deposit.amount;
+
+        // Zero the deposit record **before** the transfer so a re-entrant or
+        // repeated call cannot drain other sponsors' funds (#479).
+        let mut zeroed = deposit.clone();
+        zeroed.amount = 0;
+        env.storage().persistent().set(&dkey, &zeroed);
+
         let token_client = token::Client::new(&env, &pool.token);
-        token_client.transfer(&env.current_contract_address(), &sponsor, &deposit.amount);
+        token_client.transfer(&env.current_contract_address(), &sponsor, &transfer_amount);
 
         pool.balance = pool
             .balance
-            .checked_sub(deposit.amount)
+            .checked_sub(transfer_amount)
+            .ok_or(Error::ArithmeticOverflow)?;
+        // A reclaim is a capital outflow and must be tracked the same way as a
+        // normal withdrawal, so that get_pool and any off-chain accounting that
+        // reads total_withdrawn always reflects the full amount that left the
+        // pool. Without this update, reclaimed funds appear as "still in" the
+        // pool, breaking balance invariants. (#485)
+        pool.total_withdrawn = pool
+            .total_withdrawn
+            .checked_add(deposit.amount)
             .ok_or(Error::ArithmeticOverflow)?;
         env.storage().persistent().set(&pkey, &pool);
         extend_ttl(&env, &pkey);
@@ -387,6 +422,13 @@ mod contract {
             .persistent()
             .get(&pkey)
             .ok_or(Error::PoolNotFound)?;
+
+        // Sweeping surplus back to the contract itself is a no-op at best and
+        // an accounting error at worst; reject it the same way initialize
+        // rejects treasury == contract (issue #329).
+        if recipient == env.current_contract_address() {
+            return Err(Error::InvalidTreasury);
+        }
 
         // Verify the token matches the pool's token to avoid sweeping from
         // wrong pools or accidental token address mistakes.
