@@ -31,14 +31,28 @@ if (!secret || !contractId || !method) {
 }
 
 export function parseArg(raw) {
-  if (raw === "none") return nativeToScVal(null);
+  if (raw === "none") return nativeToScVal(null, { type: "void" });
 
   const [type, value] = raw.split(":");
   if (type === "address") return nativeToScVal(new Address(value), { type: "address" });
   if (type === "u32") return nativeToScVal(parseInt(value, 10), { type: "u32" });
   if (type === "u64") return nativeToScVal(BigInt(value), { type: "u64" });
-  if (type === "i128") return nativeToScVal(BigInt(value), { type: "i128" });
-  if (type === "none" || raw === "none") return nativeToScVal(null, { type: "void" });
+  if (type === "i128" || type === "some-i128") {
+    return nativeToScVal(BigInt(value), { type: "i128" });
+  }
+  if (type === "bool") {
+    if (value !== "true" && value !== "false") {
+      throw new Error(`Invalid bool argument: ${value}`);
+    }
+    return nativeToScVal(value === "true", { type: "bool" });
+  }
+  if (type === "bytes32") {
+    const hex = value?.replace(/^0x/i, "");
+    if (!hex || !/^[0-9a-fA-F]{64}$/.test(hex)) {
+      throw new Error("bytes32 arguments must be exactly 32 bytes of hexadecimal");
+    }
+    return nativeToScVal(Buffer.from(hex, "hex"), { type: "bytes" });
+  }
   throw new Error(`Unknown arg type: ${type}`);
 }
 

@@ -20,7 +20,7 @@ use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec};
 use types::{Contribution, DataKey, Escrow, EscrowStatus};
 
 /// Current version of the storage schema. Incremented on breaking layout changes.
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 
 /// Minimum grace period (in seconds) after the deadline before anyone can permissionlessly trigger a refund.
 /// This prevents a race condition where a legitimate release in-flight near the deadline gets front-run by a refund.
@@ -676,13 +676,36 @@ mod contract {
     }
 
     /// Upgrade the contract's wasm code. Requires admin authorization.
-    /// Preserves all existing storage and updates the version flag.
+    /// Preserves all existing storage; the new code's `migrate` entrypoint
+    /// advances the stored version after the upgrade.
     /// See docs/upgrade-storage-migration-design.md.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let admin = require_admin(&env)?;
         admin.require_auth();
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Apply storage migrations through this code version. Call after
+    /// `upgrade`; an already-migrated contract accepts a retry.
+    pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
+        require_admin(&env)?.require_auth();
+
+        let current_version = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::Version)
+            .unwrap_or(0);
+        if current_version == CONTRACT_VERSION {
+            extend_instance_ttl(&env);
+            return Ok(());
+        }
+        if current_version != from_version || from_version >= CONTRACT_VERSION {
+            return Err(Error::InvalidVersion);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::Version, &CONTRACT_VERSION);

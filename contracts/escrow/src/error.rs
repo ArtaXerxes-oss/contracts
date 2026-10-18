@@ -33,4 +33,6 @@ pub enum Error {
     /// `i128::MAX`). Returned instead of panicking under release
     /// `overflow-checks = true` + `panic = "abort"`.
     ArithmeticOverflow = 21,
+    /// The stored contract version does not match the requested migration source.
+    InvalidVersion = 22,
 }

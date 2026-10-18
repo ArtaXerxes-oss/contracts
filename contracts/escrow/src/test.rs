@@ -1264,7 +1264,7 @@ fn test_oracle_is_stored_and_rotatable() {
 
     client.initialize(&admin, &oracle, &treasury, &500u32, &None);
     assert_eq!(client.get_oracle(), oracle);
-    assert_eq!(client.get_version(), 1);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
 
     let new_oracle = Address::generate(&env);
     client.set_oracle(&new_oracle);
@@ -2355,20 +2355,40 @@ fn test_upgrade_requires_admin_auth() {
 }
 
 #[test]
-fn test_upgrade_bumps_version_flag() {
+fn test_upgrade_requires_explicit_idempotent_migration() {
     let env = Env::default();
     env.mock_all_auths();
     let (_contract_id, _admin, _treasury, client) = setup(&env);
 
-    // Before upgrade the version is CONTRACT_VERSION (1) set during initialize.
-    assert_eq!(client.get_version(), 1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
 
-    // upload_wasm returns the same hash as the current wasm — good enough to
-    // verify the version flag is re-written without a real new binary.
+    // The old implementation's upgrade call must leave its stored version
+    // intact; only the newly installed implementation can advance it.
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Version, &1u32);
+    });
     let wasm_hash = env.deployer().upload_contract_wasm(EscrowContract::__wasm());
     client.upgrade(&wasm_hash);
+    assert_eq!(client.get_version(), 1u32);
 
-    assert_eq!(client.get_version(), 1u32); // flag refreshed, value unchanged
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+}
+
+#[test]
+fn test_migrate_rejects_unauthorized_and_mismatched_versions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    env.set_auths(&[]);
+    assert!(client.try_migrate(&1u32).is_err());
+
+    env.mock_all_auths();
+    let err = client.try_migrate(&0u32);
+    assert_eq!(err, Err(Ok(Error::InvalidVersion)));
 }
 
 #[test]
@@ -2420,4 +2440,3 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
     client.set_admin(&third_admin);
     assert_eq!(client.get_admin(), third_admin);
 }
-

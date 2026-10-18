@@ -20,6 +20,43 @@ fn create_token<'a>(
     )
 }
 
+#[test]
+fn test_upgrade_requires_explicit_idempotent_migration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&DataKey::Version, &1u32);
+    });
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(MilestonesContract::__wasm());
+    client.upgrade(&wasm_hash);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+}
+
+#[test]
+fn test_migrate_requires_admin_and_matching_source_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    env.set_auths(&[]);
+    assert!(client.try_migrate(&1u32).is_err());
+
+    env.mock_all_auths();
+    assert_eq!(
+        client.try_migrate(&0u32),
+        Err(Ok(Error::InvalidVersion))
+    );
+}
+
 fn setup(env: &Env) -> (Address, Address, MilestonesContractClient<'_>) {
     let admin = Address::generate(env);
     let oracle = Address::generate(env);
@@ -365,7 +402,7 @@ fn test_initialize_rejects_double_init() {
     let env = Env::default();
     env.mock_all_auths();
     let (admin, treasury, client) = setup(&env);
-    assert_eq!(client.get_version(), 1);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
     let oracle = Address::generate(&env);
     let err = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert_eq!(err, Err(Ok(Error::AlreadyInitialized)));

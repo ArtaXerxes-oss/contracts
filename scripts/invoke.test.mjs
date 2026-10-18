@@ -54,7 +54,28 @@ describe("scripts/invoke.mjs parseArg unit tests", () => {
     assert.ok(scVal);
   });
 
-  test("parses none / void correctly", () => {
+  test("parses Some(i128) correctly", () => {
+    const scVal = parseArg("some-i128:50000000000");
+    assert.ok(scVal);
+  });
+
+  test("parses bytes32 hex correctly", () => {
+    const bytes = "0123456789abcdef".repeat(4);
+    const scVal = parseArg(`bytes32:${bytes}`);
+    assert.deepEqual(scVal.bytes(), Buffer.from(bytes, "hex"));
+  });
+
+  test("rejects bytes32 values that are not exactly 32 bytes", () => {
+    assert.throws(() => parseArg("bytes32:abcd"), /exactly 32 bytes/);
+  });
+
+  test("parses boolean values and rejects other input", () => {
+    assert.equal(parseArg("bool:true").bool(), true);
+    assert.equal(parseArg("bool:false").bool(), false);
+    assert.throws(() => parseArg("bool:yes"), /Invalid bool argument/);
+  });
+
+  test("parses none as a void value", () => {
     const scVal = parseArg("none");
     assert.ok(scVal);
   });
