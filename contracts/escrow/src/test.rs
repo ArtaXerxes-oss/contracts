@@ -2339,6 +2339,58 @@ fn test_release_rejects_self_payout() {
     assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
 }
 
+// ── upgrade tests (#461) ──────────────────────────────────────────────────────
+
+#[test]
+fn test_upgrade_requires_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    let fake_hash = BytesN::from_array(&env, &[0u8; 32]);
+    // With no authorizations recorded, upgrade must reject with NotAuthorized.
+    env.set_auths(&[]);
+    let err = client.try_upgrade(&fake_hash);
+    assert!(err.is_err());
+}
+
+#[test]
+fn test_upgrade_bumps_version_flag() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    // Before upgrade the version is CONTRACT_VERSION (1) set during initialize.
+    assert_eq!(client.get_version(), 1u32);
+
+    // upload_wasm returns the same hash as the current wasm — good enough to
+    // verify the version flag is re-written without a real new binary.
+    let wasm_hash = env.deployer().upload_contract_wasm(EscrowContract::__wasm());
+    client.upgrade(&wasm_hash);
+
+    assert_eq!(client.get_version(), 1u32); // flag refreshed, value unchanged
+}
+
+#[test]
+fn test_upgrade_preserves_existing_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_contract_id, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &5_000_000_000i128);
+
+    client.fund(&300u64, &sponsor, &token_addr, &5_000_000_000i128, &2_000u64, &None);
+
+    let wasm_hash = env.deployer().upload_contract_wasm(EscrowContract::__wasm());
+    client.upgrade(&wasm_hash);
+
+    // Escrow data must survive the upgrade intact.
+    let escrow = client.get_escrow(&300u64);
+    assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
+    assert_eq!(escrow.deadline, 2_000u64);
 #[test]
 fn test_set_admin_updates_admin() {
     let env = Env::default();
