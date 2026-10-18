@@ -1912,6 +1912,35 @@ fn test_release_issue_with_admin_as_recipient() {
     let distributable = 950_0000000i128; // after 5% fee
     assert_eq!(token_client.balance(&admin), distributable);
 }
+// ── Regression #471 (closed #307) ─────────────────────────────────────────
+// initialize must reject treasury == contract address with InvalidTreasury.
+#[test]
+fn test_initialize_rejects_treasury_equal_to_contract_address() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    let err = client.try_initialize(&admin, &oracle, &contract_id, &500u32, &None, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidTreasury)));
+}
+
+// ── Regression #477 (closed #340) ─────────────────────────────────────────
+// initialize must accept fee_bps == 10_000 (inclusive upper bound).
+#[test]
+fn test_initialize_accepts_fee_bps_at_boundary_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin, &oracle, &treasury, &10_000u32, &None, &None);
+    assert_eq!(client.get_fee_bps(), 10_000u32);
 
 #[test]
 fn test_keep_alive_succeeds_on_existing_milestone() {

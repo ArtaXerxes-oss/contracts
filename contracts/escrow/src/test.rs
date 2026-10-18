@@ -942,6 +942,50 @@ fn test_contribute_rejects_beyond_max_sponsors() {
     assert_eq!(err, Err(Ok(Error::TooManySponsors)));
 }
 
+// ── Regression #473 (closed #347) ─────────────────────────────────────────
+// An existing sponsor topping up when the escrow is already at the
+// MAX_SPONSORS cap must succeed (it does not add a new slot).
+#[test]
+fn test_existing_sponsor_can_top_up_when_at_max_sponsors_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+
+    let alice = Address::generate(&env);
+    asset_client.mint(&alice, &20_000i128);
+
+    // Alice funds: this occupies slot 0.
+    client.fund(&200u64, &alice, &token_addr, &1_000i128, &1_000u64, &None);
+
+    // Fill the remaining MAX_SPONSORS-1 slots with distinct sponsors.
+    for _ in 0..(crate::MAX_SPONSORS - 1) {
+        let extra = Address::generate(&env);
+        asset_client.mint(&extra, &1_000i128);
+        client.contribute(&200u64, &extra, &1_000i128);
+    }
+    assert_eq!(
+        client.get_escrow(&200u64).contributor_count,
+        crate::MAX_SPONSORS,
+        "escrow must be at the cap before the top-up"
+    );
+
+    // Alice (existing sponsor, slot 0) tops up — must succeed even though the
+    // cap is full, because she does not consume a new slot.
+    let balance_before = client.get_escrow(&200u64).total_funded;
+    client.contribute(&200u64, &alice, &1_000i128);
+    let balance_after = client.get_escrow(&200u64).total_funded;
+    assert_eq!(balance_after - balance_before, 1_000i128);
+
+    // contributor_count must not increase beyond the cap.
+    assert_eq!(
+        client.get_escrow(&200u64).contributor_count,
+        crate::MAX_SPONSORS
+    );
+}
+
 #[test]
 fn test_get_max_sponsors_defaults_to_the_constant_when_not_specified() {
     let env = Env::default();

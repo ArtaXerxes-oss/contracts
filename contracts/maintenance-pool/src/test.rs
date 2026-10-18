@@ -1061,6 +1061,12 @@ fn test_reclaim_deposit_requires_sponsor_auth() {
     assert!(err.is_err(), "reclaim_deposit must require the sponsor's own authorization");
 }
 
+// ── Regression #472 (closed #308) ─────────────────────────────────────────
+// initialize must reject treasury == contract address with InvalidTreasury.
+// No mock_all_auths() — admin + oracle auth is meaningful to the test.
+#[test]
+fn test_initialize_rejects_treasury_equal_to_contract_address() {
+    let env = Env::default();
 // ── Regression #329: sweep must reject the contract's own address as recipient ─
 
 #[test]
@@ -1207,6 +1213,11 @@ fn test_initialize_rejects_treasury_as_contract_address() {
     let contract_id = env.register(MaintenancePoolContract, ());
     let client = MaintenancePoolContractClient::new(&env, &contract_id);
 
+    env.mock_all_auths();
+    // Pass the contract's own address as treasury — must be rejected.
+    let err = client.try_initialize(&admin, &oracle, &contract_id, &1_000u32, &None);
+    assert_eq!(err, Err(Ok(Error::InvalidTreasury)));
+}
     // treasury == contract_id should return InvalidTreasury.
     let err = client.try_initialize(&admin, &oracle, &contract_id, &1_000u32, &None);
     assert_eq!(err, Err(Ok(Error::InvalidTreasury)));
