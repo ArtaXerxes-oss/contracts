@@ -28,6 +28,14 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # A contract module that isn't re-exported leaves the contract struct,
+      # its generated Client and every helper it calls unreachable, which
+      # surfaces as dead_code warnings on a plain library build.
+      - name: Build without dead_code warnings
+        env:
+          RUSTFLAGS: "-D dead_code"
+        run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
 
       - name: Security audit
