@@ -505,6 +505,18 @@ unreleasable, unrefundable — until someone submits a `RestoreFootprint`
 operation. Restoring an archived entry is a real Soroban operation but is
 not automated by anything in this repo's scripts today.
 
+## Contract events
+
+The milestones and maintenance-pool contracts publish typed Soroban events
+for successful funding, allocation, payout, refund, recovery, and
+administrative operations. Milestone events index `milestone_id` and, where
+applicable, `issue_id`; maintenance-pool events index `pool_id`. Releases and
+withdrawals publish a summary containing the fee and treasury, plus one
+recipient event for each positive payout. Milestone cancellations and
+maintenance-pool reclaims likewise publish recipient-level refund events.
+Clients should consume these events for an auditable transaction history
+rather than infer transfers from state snapshots alone.
+
 ## Security model
 
 - **Admin / oracle authorization.** Two `Address` values are set at

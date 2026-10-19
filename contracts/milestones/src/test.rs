@@ -4,8 +4,16 @@ use super::*;
 use mergefi_common::MAX_SPONSORS;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env,
+    token, vec, Address, Env, Event,
 };
+
+fn assert_event<T: Event>(env: &Env, contract_id: &Address, event: T) {
+    assert!(env
+        .events()
+        .all()
+        .events()
+        .contains(&event.to_xdr(env, contract_id)));
+}
 
 fn create_token<'a>(
     env: &Env,
@@ -65,6 +73,263 @@ fn setup(env: &Env) -> (Address, Address, MilestonesContractClient<'_>) {
     let client = MilestonesContractClient::new(env, &contract_id);
     client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None); // 5% fee, no recovery
     (admin, treasury, client)
+}
+
+#[test]
+fn test_milestone_lifecycle_and_admin_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let recovery = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &None,
+        &Some(recovery.clone()),
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        ContractInitialized {
+            admin: admin.clone(),
+            oracle: oracle.clone(),
+            treasury: treasury.clone(),
+            fee_bps: 500,
+            max_sponsors: MAX_SPONSORS,
+            recovery: Some(recovery.clone()),
+        },
+    );
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor_a = Address::generate(&env);
+    let sponsor_b = Address::generate(&env);
+    asset_client.mint(&sponsor_a, &1_000i128);
+    asset_client.mint(&sponsor_b, &1_000i128);
+
+    client.create_milestone(&443u64, &sponsor_a, &token_addr, &1_000i128, &1_000u64);
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneCreated {
+            milestone_id: 443,
+            sponsor: sponsor_a.clone(),
+            token: token_addr.clone(),
+            amount: 1_000,
+            deadline: 1_000,
+        },
+    );
+    client.contribute(&443u64, &sponsor_b, &1_000i128);
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneContributed {
+            milestone_id: 443,
+            sponsor: sponsor_b.clone(),
+            amount: 1_000,
+            total_budget: 2_000,
+        },
+    );
+
+    client.allocate(&443u64, &12u64, &1_000i128);
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneAllocated {
+            milestone_id: 443,
+            issue_id: 12,
+            amount: 1_000,
+        },
+    );
+    client.deallocate(&443u64, &12u64);
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneDeallocated {
+            milestone_id: 443,
+            issue_id: 12,
+            amount: 1_000,
+        },
+    );
+    client.allocate(&443u64, &12u64, &1_000i128);
+    let recipient = Address::generate(&env);
+    client.release_issue(
+        &443u64,
+        &12u64,
+        &vec![&env, (recipient.clone(), 10_000u32)],
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        IssuePaidTo {
+            milestone_id: 443,
+            issue_id: 12,
+            recipient,
+            amount: 950,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        IssueReleased {
+            milestone_id: 443,
+            issue_id: 12,
+            amount: 1_000,
+            fee: 50,
+            treasury: treasury.clone(),
+        },
+    );
+
+    client.cancel_milestone(&443u64);
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneRefundPaid {
+            milestone_id: 443,
+            sponsor: sponsor_a.clone(),
+            amount: 500,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneRefundPaid {
+            milestone_id: 443,
+            sponsor: sponsor_b,
+            amount: 500,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneCancelled {
+            milestone_id: 443,
+            refunded_amount: 1_000,
+            permissionless: false,
+        },
+    );
+    client.keep_alive(&443u64);
+    assert_event(&env, &contract_id, MilestoneKeptAlive { milestone_id: 443 });
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminChanged {
+            old_admin: admin,
+            new_admin: new_admin.clone(),
+        },
+    );
+    let new_oracle = Address::generate(&env);
+    client.set_oracle(&new_oracle);
+    assert_event(
+        &env,
+        &contract_id,
+        OracleChanged {
+            old_oracle: oracle,
+            new_oracle,
+        },
+    );
+    let recovered_admin = Address::generate(&env);
+    client.recover_admin(&recovered_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminRecovered {
+            recovery,
+            new_admin: recovered_admin.clone(),
+        },
+    );
+    let new_treasury = Address::generate(&env);
+    client.set_treasury(&new_treasury);
+    assert_event(
+        &env,
+        &contract_id,
+        TreasuryChanged {
+            old_treasury: treasury,
+            new_treasury,
+        },
+    );
+    client.set_fee_bps(&750u32);
+    assert_event(
+        &env,
+        &contract_id,
+        FeeBpsChanged {
+            old_fee_bps: 500,
+            new_fee_bps: 750,
+        },
+    );
+    client.pause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractPaused {
+            admin: recovered_admin.clone(),
+        },
+    );
+    client.unpause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUnpaused {
+            admin: recovered_admin.clone(),
+        },
+    );
+
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(MilestonesContract::__wasm());
+    client.upgrade(&wasm_hash);
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUpgraded {
+            admin: recovered_admin,
+            wasm_hash,
+            version: CONTRACT_VERSION,
+        },
+    );
+}
+
+#[test]
+fn test_permissionless_milestone_cancellation_emits_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+    let contract_id = client.address.clone();
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &1_000i128);
+
+    client.create_milestone(&444u64, &sponsor, &token_addr, &1_000i128, &100u64);
+    env.ledger().set_timestamp(100 + GRACE_PERIOD);
+    client.cancel_milestone_after_deadline(&444u64);
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneCancelled {
+            milestone_id: 444,
+            refunded_amount: 1_000,
+            permissionless: true,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        MilestoneRefundPaid {
+            milestone_id: 444,
+            sponsor,
+            amount: 1_000,
+        },
+    );
 }
 
 #[test]

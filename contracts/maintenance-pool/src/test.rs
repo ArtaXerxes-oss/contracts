@@ -3,8 +3,16 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env,
+    token, vec, Address, Env, Event,
 };
+
+fn assert_event<T: Event>(env: &Env, contract_id: &Address, event: T) {
+    assert!(env
+        .events()
+        .all()
+        .events()
+        .contains(&event.to_xdr(env, contract_id)));
+}
 
 fn create_token<'a>(
     env: &Env,
@@ -27,6 +35,179 @@ fn setup(env: &Env) -> (Address, Address, MaintenancePoolContractClient<'_>) {
     let client = MaintenancePoolContractClient::new(env, &contract_id);
     client.initialize(&admin, &oracle, &treasury, &1_000u32, &None); // 10% fee
     (admin, treasury, client)
+}
+
+#[test]
+fn test_pool_lifecycle_and_admin_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let recovery = Address::generate(&env);
+    let contract_id = env.register(MaintenancePoolContract, ());
+    let client = MaintenancePoolContractClient::new(&env, &contract_id);
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &1_000u32,
+        &Some(recovery.clone()),
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        ContractInitialized {
+            admin: admin.clone(),
+            oracle: oracle.clone(),
+            treasury: treasury.clone(),
+            fee_bps: 1_000,
+            recovery: Some(recovery.clone()),
+        },
+    );
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor_a = Address::generate(&env);
+    let sponsor_b = Address::generate(&env);
+    asset_client.mint(&sponsor_a, &2_000i128);
+    asset_client.mint(&sponsor_b, &1_000i128);
+
+    client.deposit(&445u64, &sponsor_a, &token_addr, &1_000i128);
+    assert_event(
+        &env,
+        &contract_id,
+        PoolDeposited {
+            pool_id: 445,
+            sponsor: sponsor_a.clone(),
+            token: token_addr.clone(),
+            amount: 1_000,
+            balance: 1_000,
+        },
+    );
+    client.deposit(&445u64, &sponsor_b, &token_addr, &1_000i128);
+
+    let recipient = Address::generate(&env);
+    client.withdraw(
+        &445u64,
+        &vec![&env, (recipient.clone(), 10_000u32)],
+        &1_000i128,
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        PoolPaidTo {
+            pool_id: 445,
+            recipient,
+            amount: 900,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        PoolWithdrawn {
+            pool_id: 445,
+            amount: 1_000,
+            fee: 100,
+            treasury: treasury.clone(),
+        },
+    );
+
+    env.ledger().set_timestamp(INACTIVITY_WINDOW);
+    client.reclaim_deposit(&445u64, &0u32, &sponsor_a);
+    assert_event(
+        &env,
+        &contract_id,
+        DepositReclaimed {
+            pool_id: 445,
+            sponsor: sponsor_a.clone(),
+            deposit_index: 0,
+            amount: 1_000,
+        },
+    );
+    token_client.transfer(&sponsor_a, &contract_id, &17i128);
+    assert_eq!(client.sweep(&445u64, &token_addr, &sponsor_b), 17);
+    assert_event(
+        &env,
+        &contract_id,
+        PoolSwept {
+            pool_id: 445,
+            recipient: sponsor_b.clone(),
+            token: token_addr.clone(),
+            amount: 17,
+        },
+    );
+    client.keep_alive(&445u64);
+    assert_event(&env, &contract_id, PoolKeptAlive { pool_id: 445 });
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminChanged {
+            old_admin: admin,
+            new_admin: new_admin.clone(),
+        },
+    );
+    let new_oracle = Address::generate(&env);
+    client.set_oracle(&new_oracle);
+    assert_event(
+        &env,
+        &contract_id,
+        OracleChanged {
+            old_oracle: oracle,
+            new_oracle,
+        },
+    );
+    let recovered_admin = Address::generate(&env);
+    client.recover_admin(&recovered_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminRecovered {
+            recovery,
+            new_admin: recovered_admin.clone(),
+        },
+    );
+    let new_treasury = Address::generate(&env);
+    client.set_treasury(&new_treasury);
+    assert_event(
+        &env,
+        &contract_id,
+        TreasuryChanged {
+            old_treasury: treasury,
+            new_treasury,
+        },
+    );
+    client.pause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractPaused {
+            admin: recovered_admin.clone(),
+        },
+    );
+    client.unpause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUnpaused {
+            admin: recovered_admin.clone(),
+        },
+    );
+
+    let wasm_hash = native_wasm_hash(&env);
+    client.upgrade(&wasm_hash);
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUpgraded {
+            admin: recovered_admin,
+            wasm_hash,
+            version: CONTRACT_VERSION,
+        },
+    );
 }
 
 #[test]

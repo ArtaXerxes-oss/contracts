@@ -19,7 +19,7 @@ mod types;
 mod test;
 
 use error::Error;
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Map, Vec};
+use soroban_sdk::{contract, contractevent, contractimpl, token, Address, BytesN, Env, Map, Vec};
 use types::{Contribution, DataKey, IssueStatus, Milestone};
 
 use mergefi_common::{BPS_DENOMINATOR, MAX_SPONSORS};
@@ -40,6 +40,177 @@ const CONTRACT_VERSION: u32 = 2;
 #[allow(missing_docs)]
 mod contract {
     use super::*;
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractInitialized {
+        #[topic]
+        pub admin: Address,
+        #[topic]
+        pub oracle: Address,
+        pub treasury: Address,
+        pub fee_bps: u32,
+        pub max_sponsors: u32,
+        pub recovery: Option<Address>,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneCreated {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub sponsor: Address,
+        pub token: Address,
+        pub amount: i128,
+        pub deadline: u64,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneContributed {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub sponsor: Address,
+        pub amount: i128,
+        pub total_budget: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneAllocated {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub issue_id: u64,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneDeallocated {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub issue_id: u64,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct IssueReleased {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub issue_id: u64,
+        pub amount: i128,
+        pub fee: i128,
+        pub treasury: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct IssuePaidTo {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub issue_id: u64,
+        pub recipient: Address,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneCancelled {
+        #[topic]
+        pub milestone_id: u64,
+        pub refunded_amount: i128,
+        pub permissionless: bool,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneRefundPaid {
+        #[topic]
+        pub milestone_id: u64,
+        #[topic]
+        pub sponsor: Address,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct MilestoneKeptAlive {
+        #[topic]
+        pub milestone_id: u64,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractPaused {
+        #[topic]
+        pub admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractUnpaused {
+        #[topic]
+        pub admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AdminChanged {
+        #[topic]
+        pub old_admin: Address,
+        #[topic]
+        pub new_admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AdminRecovered {
+        #[topic]
+        pub recovery: Address,
+        #[topic]
+        pub new_admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct OracleChanged {
+        #[topic]
+        pub old_oracle: Address,
+        #[topic]
+        pub new_oracle: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct TreasuryChanged {
+        #[topic]
+        pub old_treasury: Address,
+        #[topic]
+        pub new_treasury: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct FeeBpsChanged {
+        pub old_fee_bps: u32,
+        pub new_fee_bps: u32,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractUpgraded {
+        #[topic]
+        pub admin: Address,
+        pub wasm_hash: BytesN<32>,
+        pub version: u32,
+    }
 
     #[contract]
     pub struct MilestonesContract;
@@ -86,13 +257,22 @@ mod contract {
                 .instance()
                 .set(&DataKey::Version, &CONTRACT_VERSION);
             env.storage().instance().set(&DataKey::Paused, &false);
-            if let Some(r) = recovery {
+            if let Some(r) = recovery.clone() {
                 // Recovery address is explicitly set once at initialization and
                 // cannot be changed later. It allows recovery of the admin key
                 // if it is lost; see docs/access-control-audit.md for rationale.
                 env.storage().instance().set(&DataKey::Recovery, &r);
             }
             extend_instance_ttl(&env);
+            ContractInitialized {
+                admin,
+                oracle,
+                treasury,
+                fee_bps,
+                max_sponsors: max_sponsors.unwrap_or(MAX_SPONSORS),
+                recovery,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -165,8 +345,8 @@ mod contract {
             extend_ttl(&env, &contribution_key);
 
             let milestone = Milestone {
-                sponsor,
-                token,
+                sponsor: sponsor.clone(),
+                token: token.clone(),
                 total_budget: actual_received,
                 remaining_budget: actual_received,
                 created_at: env.ledger().timestamp(),
@@ -178,6 +358,14 @@ mod contract {
             env.storage().persistent().set(&key, &milestone);
             extend_ttl(&env, &key);
             extend_instance_ttl(&env);
+            MilestoneCreated {
+                milestone_id,
+                sponsor,
+                token,
+                amount: actual_received,
+                deadline,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -274,7 +462,7 @@ mod contract {
                 env.storage().persistent().set(
                     &contribution_key,
                     &Contribution {
-                        sponsor,
+                        sponsor: sponsor.clone(),
                         amount: actual_received,
                         timestamp: env.ledger().timestamp(),
                     },
@@ -305,6 +493,13 @@ mod contract {
                 extend_ttl(&env, &DataKey::Contribution(milestone_id, i));
             }
             extend_instance_ttl(&env);
+            MilestoneContributed {
+                milestone_id,
+                sponsor,
+                amount: actual_received,
+                total_budget: milestone.total_budget,
+            }
+            .publish(&env);
 
             Ok(())
         }
@@ -382,6 +577,12 @@ mod contract {
                 .set(&skey, &IssueStatus::Allocated);
             extend_ttl(&env, &skey);
             extend_instance_ttl(&env);
+            MilestoneAllocated {
+                milestone_id,
+                issue_id,
+                amount,
+            }
+            .publish(&env);
 
             Ok(())
         }
@@ -457,8 +658,23 @@ mod contract {
             for (recipient, share) in payouts.shares.iter() {
                 if share > 0 {
                     token_client.transfer(&contract_address, &recipient, &share);
+                    IssuePaidTo {
+                        milestone_id,
+                        issue_id,
+                        recipient,
+                        amount: share,
+                    }
+                    .publish(&env);
                 }
             }
+            IssueReleased {
+                milestone_id,
+                issue_id,
+                amount,
+                fee: payouts.fee,
+                treasury,
+            }
+            .publish(&env);
 
             // Refresh the parent milestone's Contribution sub-records so they
             // stay alive as individual issues are released over the milestone's
@@ -493,6 +709,7 @@ mod contract {
                 return Err(Error::MilestoneClosed);
             }
 
+            let refunded_amount = milestone.remaining_budget;
             if milestone.remaining_budget > 0 {
                 refund_remaining_budget(&env, milestone_id, &milestone)?;
                 milestone.remaining_budget = 0;
@@ -501,6 +718,12 @@ mod contract {
             env.storage().persistent().set(&mkey, &milestone);
             extend_ttl(&env, &mkey);
             extend_instance_ttl(&env);
+            MilestoneCancelled {
+                milestone_id,
+                refunded_amount,
+                permissionless: false,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -563,6 +786,12 @@ mod contract {
 
             env.storage().persistent().set(&mkey, &milestone);
             extend_ttl(&env, &mkey);
+            MilestoneDeallocated {
+                milestone_id,
+                issue_id,
+                amount,
+            }
+            .publish(&env);
 
     /// Upgrade the contract's wasm code. Requires admin authorization.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
@@ -611,6 +840,7 @@ mod contract {
 
             env.storage().instance().set(&DataKey::Paused, &true);
             extend_instance_ttl(&env);
+            ContractPaused { admin }.publish(&env);
             Ok(())
         }
 
@@ -621,6 +851,7 @@ mod contract {
 
             env.storage().instance().set(&DataKey::Paused, &false);
             extend_instance_ttl(&env);
+            ContractUnpaused { admin }.publish(&env);
             Ok(())
         }
 
@@ -637,11 +868,18 @@ mod contract {
             let admin = require_admin(&env)?;
             admin.require_auth();
 
-            env.deployer().update_current_contract_wasm(new_wasm_hash);
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
             env.storage()
                 .instance()
                 .set(&DataKey::Version, &CONTRACT_VERSION);
             extend_instance_ttl(&env);
+            ContractUpgraded {
+                admin,
+                wasm_hash: new_wasm_hash,
+                version: CONTRACT_VERSION,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -671,6 +909,7 @@ mod contract {
                 return Err(Error::DeadlineNotPassed);
             }
 
+            let refunded_amount = milestone.remaining_budget;
             if milestone.remaining_budget > 0 {
                 refund_remaining_budget(&env, milestone_id, &milestone)?;
                 milestone.remaining_budget = 0;
@@ -679,6 +918,12 @@ mod contract {
             env.storage().persistent().set(&mkey, &milestone);
             extend_ttl(&env, &mkey);
             extend_instance_ttl(&env);
+            MilestoneCancelled {
+                milestone_id,
+                refunded_amount,
+                permissionless: true,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -724,6 +969,7 @@ mod contract {
                 extend_ttl(&env, &DataKey::IssueStatus(milestone_id, issue_id));
             }
 
+            MilestoneKeptAlive { milestone_id }.publish(&env);
             Ok(())
         }
 
@@ -763,19 +1009,31 @@ mod contract {
 
         /// Admin-authorized rotation: the current admin may set a new admin.
         pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-            require_admin(&env)?.require_auth();
+            let old_admin = require_admin(&env)?;
+            old_admin.require_auth();
             new_admin.require_auth();
             env.storage().instance().set(&DataKey::Admin, &new_admin);
             extend_instance_ttl(&env);
+            AdminChanged {
+                old_admin,
+                new_admin,
+            }
+            .publish(&env);
             Ok(())
         }
 
         /// Admin-only: rotate the routine oracle key.
         pub fn set_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
+            let old_oracle = require_oracle(&env)?;
             require_admin(&env)?.require_auth();
             new_oracle.require_auth();
             env.storage().instance().set(&DataKey::Oracle, &new_oracle);
             extend_instance_ttl(&env);
+            OracleChanged {
+                old_oracle,
+                new_oracle,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -792,6 +1050,11 @@ mod contract {
             new_admin.require_auth();
             env.storage().instance().set(&DataKey::Admin, &new_admin);
             extend_instance_ttl(&env);
+            AdminRecovered {
+                recovery,
+                new_admin,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -799,10 +1062,17 @@ mod contract {
         /// treasury depending on policy; here we require the current admin.
         pub fn set_treasury(env: Env, new_treasury: Address) -> Result<(), Error> {
             require_admin(&env)?.require_auth();
+            let old_treasury =
+                mergefi_common::require_treasury::<DataKey>(&env).ok_or(Error::NotInitialized)?;
             env.storage()
                 .instance()
                 .set(&DataKey::Treasury, &new_treasury);
             extend_instance_ttl(&env);
+            TreasuryChanged {
+                old_treasury,
+                new_treasury,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -890,6 +1160,11 @@ mod contract {
 
             env.storage().instance().set(&DataKey::FeeBps, &new_fee_bps);
             extend_instance_ttl(&env);
+            FeeBpsChanged {
+                old_fee_bps: current_fee,
+                new_fee_bps,
+            }
+            .publish(&env);
             Ok(())
         }
     }
@@ -973,6 +1248,12 @@ fn refund_remaining_budget(
     for (recipient, share) in shares.iter() {
         if share > 0 {
             token_client.transfer(&contract_address, &recipient, &share);
+            MilestoneRefundPaid {
+                milestone_id,
+                sponsor: recipient,
+                amount: share,
+            }
+            .publish(env);
         }
     }
 
