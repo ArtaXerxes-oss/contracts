@@ -7,29 +7,28 @@ use soroban_sdk::contracterror;
 pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized = 2,
-    Unauthorized = 3,
-    PoolNotFound = 4,
-    TokenMismatch = 5,
-    InvalidAmount = 6,
-    InsufficientBalance = 7,
-    InvalidFee = 8,
+    PoolNotFound = 3,
+    TokenMismatch = 4,
+    InvalidAmount = 5,
+    InsufficientBalance = 6,
+    InvalidFee = 7,
     /// Treasury cannot be set to the contract's own address (issue #39).
-    InvalidTreasury = 9,
+    InvalidTreasury = 8,
     /// The deposit's inactivity window has not yet elapsed (issue #42).
-    InactivityWindowNotElapsed = 10,
+    InactivityWindowNotElapsed = 9,
     /// The caller is not the deposit's original sponsor (issue #42).
-    NotDepositSponsor = 11,
+    NotDepositSponsor = 10,
     /// The deposit index is out of range (issue #42).
-    DepositNotFound = 12,
+    DepositNotFound = 11,
     /// Contract is paused and this operation is not allowed (issue #14).
-    ContractPaused = 13,
+    ContractPaused = 12,
     /// The deposit count has reached its maximum limit (issue #45).
-    DepositCountOverflow = 14,
+    DepositCountOverflow = 13,
     /// The pool already holds `MAX_DEPOSITS` deposits (issue #94).
-    TooManyDeposits = 15,
+    TooManyDeposits = 14,
     /// The deposit has already been reclaimed; a second reclaim is rejected
     /// to prevent the same index from draining other sponsors' funds (#479).
-    AlreadyReclaimed = 17,
+    AlreadyReclaimed = 15,
     /// Checked i128 arithmetic overflowed (e.g. `balance` / monotonic
     /// `total_deposited` near `i128::MAX`). Returned instead of panicking
     /// under release `overflow-checks = true` + `panic = "abort"`.
