@@ -16,7 +16,7 @@ mod types;
 mod test;
 
 use error::Error;
-use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractevent, contractimpl, token, Address, BytesN, Env, Vec};
 use types::{DataKey, Deposit, MaintenancePool};
 
 use mergefi_common::BPS_DENOMINATOR;
@@ -46,6 +46,138 @@ const CONTRACT_VERSION: u32 = 2;
 #[allow(missing_docs)]
 mod contract {
     use super::*;
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractInitialized {
+        #[topic]
+        pub admin: Address,
+        #[topic]
+        pub oracle: Address,
+        pub treasury: Address,
+        pub fee_bps: u32,
+        pub recovery: Option<Address>,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PoolDeposited {
+        #[topic]
+        pub pool_id: u64,
+        #[topic]
+        pub sponsor: Address,
+        pub token: Address,
+        pub amount: i128,
+        pub balance: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PoolWithdrawn {
+        #[topic]
+        pub pool_id: u64,
+        pub amount: i128,
+        pub fee: i128,
+        pub treasury: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PoolPaidTo {
+        #[topic]
+        pub pool_id: u64,
+        #[topic]
+        pub recipient: Address,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct DepositReclaimed {
+        #[topic]
+        pub pool_id: u64,
+        #[topic]
+        pub sponsor: Address,
+        pub deposit_index: u32,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PoolSwept {
+        #[topic]
+        pub pool_id: u64,
+        #[topic]
+        pub recipient: Address,
+        pub token: Address,
+        pub amount: i128,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PoolKeptAlive {
+        #[topic]
+        pub pool_id: u64,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractPaused {
+        #[topic]
+        pub admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractUnpaused {
+        #[topic]
+        pub admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AdminChanged {
+        #[topic]
+        pub old_admin: Address,
+        #[topic]
+        pub new_admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct AdminRecovered {
+        #[topic]
+        pub recovery: Address,
+        #[topic]
+        pub new_admin: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct OracleChanged {
+        #[topic]
+        pub old_oracle: Address,
+        #[topic]
+        pub new_oracle: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct TreasuryChanged {
+        #[topic]
+        pub old_treasury: Address,
+        #[topic]
+        pub new_treasury: Address,
+    }
+
+    #[contractevent]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ContractUpgraded {
+        #[topic]
+        pub admin: Address,
+        pub wasm_hash: BytesN<32>,
+        pub version: u32,
+    }
 
     #[contract]
     pub struct MaintenancePoolContract;
@@ -84,10 +216,18 @@ mod contract {
                 .instance()
                 .set(&DataKey::Version, &CONTRACT_VERSION);
             env.storage().instance().set(&DataKey::Paused, &false);
-            if let Some(r) = recovery {
+            if let Some(r) = recovery.clone() {
                 env.storage().instance().set(&DataKey::Recovery, &r);
             }
             extend_instance_ttl(&env);
+            ContractInitialized {
+                admin,
+                oracle,
+                treasury,
+                fee_bps,
+                recovery,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -159,7 +299,7 @@ mod contract {
             env.storage().persistent().set(
                 &dkey,
                 &Deposit {
-                    sponsor,
+                    sponsor: sponsor.clone(),
                     amount,
                     timestamp: env.ledger().timestamp(),
                 },
@@ -174,6 +314,14 @@ mod contract {
                 extend_ttl(&env, &DataKey::Deposit(pool_id, i));
             }
             extend_instance_ttl(&env);
+            PoolDeposited {
+                pool_id,
+                sponsor,
+                token,
+                amount,
+                balance: pool.balance,
+            }
+            .publish(&env);
 
             Ok(())
         }
@@ -242,6 +390,12 @@ mod contract {
             for (recipient, share) in payouts.shares.iter() {
                 if share > 0 {
                     token_client.transfer(&contract_address, &recipient, &share);
+                    PoolPaidTo {
+                        pool_id,
+                        recipient,
+                        amount: share,
+                    }
+                    .publish(&env);
                 }
             }
 
@@ -251,6 +405,13 @@ mod contract {
                 extend_ttl(&env, &DataKey::Deposit(pool_id, i));
             }
             extend_instance_ttl(&env);
+            PoolWithdrawn {
+                pool_id,
+                amount,
+                fee: payouts.fee,
+                treasury,
+            }
+            .publish(&env);
 
             Ok(())
         }
@@ -346,6 +507,13 @@ mod contract {
             env.storage().persistent().set(&pkey, &pool);
             extend_ttl(&env, &pkey);
             extend_instance_ttl(&env);
+            DepositReclaimed {
+                pool_id,
+                sponsor,
+                deposit_index,
+                amount: transfer_amount,
+            }
+            .publish(&env);
 
             Ok(())
         }
@@ -387,6 +555,7 @@ mod contract {
                 extend_ttl(&env, &DataKey::Deposit(pool_id, i));
             }
 
+            PoolKeptAlive { pool_id }.publish(&env);
             Ok(())
         }
 
@@ -447,6 +616,13 @@ mod contract {
                 token_client.transfer(&contract_address, &recipient, &surplus);
             }
 
+            PoolSwept {
+                pool_id,
+                recipient,
+                token,
+                amount: surplus,
+            }
+            .publish(&env);
             Ok(surplus)
         }
 
@@ -458,6 +634,7 @@ mod contract {
 
             env.storage().instance().set(&DataKey::Paused, &true);
             extend_instance_ttl(&env);
+            ContractPaused { admin }.publish(&env);
             Ok(())
         }
 
@@ -468,6 +645,7 @@ mod contract {
 
             env.storage().instance().set(&DataKey::Paused, &false);
             extend_instance_ttl(&env);
+            ContractUnpaused { admin }.publish(&env);
             Ok(())
         }
 
@@ -484,8 +662,15 @@ mod contract {
         let admin = require_admin(&env)?;
         admin.require_auth();
 
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
         extend_instance_ttl(&env);
+        ContractUpgraded {
+            admin,
+            wasm_hash: new_wasm_hash,
+            version: CONTRACT_VERSION,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -564,20 +749,32 @@ mod contract {
         /// Admin-only: rotate the admin address. Requires both current admin
         /// and new admin authorization.
         pub fn set_admin(env: Env, new_admin: Address) -> Result<(), Error> {
-            require_admin(&env)?.require_auth();
+            let old_admin = require_admin(&env)?;
+            old_admin.require_auth();
             new_admin.require_auth();
             env.storage().instance().set(&DataKey::Admin, &new_admin);
             extend_instance_ttl(&env);
+            AdminChanged {
+                old_admin,
+                new_admin,
+            }
+            .publish(&env);
             Ok(())
         }
 
         /// Admin-only: rotate the oracle address. Requires both current admin
         /// and new oracle authorization.
         pub fn set_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
+            let old_oracle = require_oracle(&env)?;
             require_admin(&env)?.require_auth();
             new_oracle.require_auth();
             env.storage().instance().set(&DataKey::Oracle, &new_oracle);
             extend_instance_ttl(&env);
+            OracleChanged {
+                old_oracle,
+                new_oracle,
+            }
+            .publish(&env);
             Ok(())
         }
 
@@ -594,16 +791,28 @@ mod contract {
             new_admin.require_auth();
             env.storage().instance().set(&DataKey::Admin, &new_admin);
             extend_instance_ttl(&env);
+            AdminRecovered {
+                recovery,
+                new_admin,
+            }
+            .publish(&env);
             Ok(())
         }
 
         /// Admin-only: rotate the treasury address.
         pub fn set_treasury(env: Env, new_treasury: Address) -> Result<(), Error> {
             require_admin(&env)?.require_auth();
+            let old_treasury =
+                mergefi_common::require_treasury::<DataKey>(&env).ok_or(Error::NotInitialized)?;
             env.storage()
                 .instance()
                 .set(&DataKey::Treasury, &new_treasury);
             extend_instance_ttl(&env);
+            TreasuryChanged {
+                old_treasury,
+                new_treasury,
+            }
+            .publish(&env);
             Ok(())
         }
     }
