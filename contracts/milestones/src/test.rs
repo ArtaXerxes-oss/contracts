@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use mergefi_common::MAX_SPONSORS;
+use mergefi_common::{MAX_SPONSORS, MAX_SPONSORS_LIMIT};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, vec, Address, Env, Event,
@@ -1017,6 +1017,37 @@ fn test_initialize_accepts_a_custom_max_sponsors() {
     asset_client.mint(&carol, &1_000i128);
     let err = client.try_contribute(&57u64, &carol, &1_000i128);
     assert_eq!(err, Err(Ok(Error::TooManySponsors)));
+}
+
+#[test]
+fn test_initialize_caps_max_sponsors_at_shared_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(MilestonesContract, ());
+    let client = MilestonesContractClient::new(&env, &contract_id);
+
+    let err = client.try_initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &Some(MAX_SPONSORS_LIMIT + 1),
+        &None,
+    );
+    assert_eq!(err, Err(Ok(Error::InvalidMaxSponsors)));
+
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &Some(MAX_SPONSORS_LIMIT),
+        &None,
+    );
+    assert_eq!(client.get_max_sponsors(), MAX_SPONSORS_LIMIT);
 }
 
 #[test]
