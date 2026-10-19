@@ -3,8 +3,16 @@
 use super::*;
 use soroban_sdk::{
     testutils::{storage::Persistent as _, Address as _, Ledger},
-    token, vec, Address, Env,
+    token, vec, Address, Env, Event,
 };
+
+fn assert_event<T: Event>(env: &Env, contract_id: &Address, event: T) {
+    assert!(env
+        .events()
+        .all()
+        .events()
+        .contains(&event.to_xdr(env, contract_id)));
+}
 
 fn create_token<'a>(
     env: &Env,
@@ -25,7 +33,7 @@ fn setup(env: &Env) -> (Address, Address, Address, EscrowContractClient<'_>) {
     let treasury = Address::generate(env);
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(env, &contract_id);
-    client.initialize(&admin, &oracle, &treasury, &500u32, &None); // 5% fee
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None); // 5% fee
     (contract_id, admin, treasury, client)
 }
 
@@ -35,7 +43,7 @@ fn test_initialize_rejects_double_init() {
     env.mock_all_auths();
     let (_, admin, treasury, client) = setup(&env);
     let oracle = Address::generate(&env);
-    let err = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None);
+    let err = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert_eq!(err, Err(Ok(Error::AlreadyInitialized)));
 }
 
@@ -49,7 +57,10 @@ fn test_getters_return_not_initialized_before_initialize() {
     assert_eq!(client.try_get_oracle(), Err(Ok(Error::NotInitialized)));
     assert_eq!(client.try_get_treasury(), Err(Ok(Error::NotInitialized)));
     assert_eq!(client.try_get_fee_bps(), Err(Ok(Error::NotInitialized)));
-    assert_eq!(client.try_get_max_sponsors(), Err(Ok(Error::NotInitialized)));
+    assert_eq!(
+        client.try_get_max_sponsors(),
+        Err(Ok(Error::NotInitialized))
+    );
 }
 
 #[test]
@@ -62,7 +73,7 @@ fn test_initialize_rejects_fee_bps_above_10000() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    let err = client.try_initialize(&admin, &oracle, &treasury, &10_001u32, &None);
+    let err = client.try_initialize(&admin, &oracle, &treasury, &10_001u32, &None, &None);
     assert_eq!(err, Err(Ok(Error::InvalidFee)));
 }
 
@@ -76,7 +87,7 @@ fn test_initialize_accepts_fee_bps_at_boundary_10000() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &oracle, &treasury, &10_000u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &10_000u32, &None, &None);
     assert_eq!(client.get_fee_bps(), 10_000u32);
 }
 
@@ -116,6 +127,223 @@ fn test_fund_and_release_single_recipient() {
     // 5% fee -> 50_0000000, contributor gets 950_0000000
     assert_eq!(token_client.balance(&contributor), 950_0000000i128);
     assert_eq!(token_client.balance(&treasury), 50_0000000i128);
+}
+
+#[test]
+fn test_escrow_lifecycle_events_include_issue_and_payout_details() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract_id, _, treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+    let contributor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    client.fund(
+        &501u64,
+        &sponsor,
+        &token_addr,
+        &1_000i128,
+        &1_000u64,
+        &Some(2_000i128),
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowFunded {
+            issue_id: 501,
+            sponsor: sponsor.clone(),
+            token: token_addr.clone(),
+            amount: 1_000,
+            deadline: 1_000,
+            target: Some(2_000),
+        },
+    );
+
+    client.contribute(&501u64, &contributor, &500i128);
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowContributed {
+            issue_id: 501,
+            sponsor: contributor,
+            amount: 500,
+            total_amount: 1_500,
+        },
+    );
+
+    let recipients = vec![&env, (recipient.clone(), 10_000u32)];
+    client.release(&501u64, &recipients);
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowPaidTo {
+            issue_id: 501,
+            recipient,
+            amount: 1_425,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowReleased {
+            issue_id: 501,
+            amount: 1_500,
+            fee: 75,
+            treasury,
+        },
+    );
+
+    let deadline = env.ledger().timestamp() + 1_000;
+    client.fund(&502u64, &sponsor, &token_addr, &1_000i128, &deadline, &None);
+    client.extend_deadline(&502u64, &sponsor, &(deadline + 1_000));
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowDeadlineExtended {
+            issue_id: 502,
+            old_deadline: deadline,
+            new_deadline: deadline + 1_000,
+        },
+    );
+    client.refund(&502u64);
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowRefundPaid {
+            issue_id: 502,
+            sponsor,
+            amount: 1_000,
+        },
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        EscrowRefunded {
+            issue_id: 502,
+            amount: 1_000,
+        },
+    );
+}
+
+#[test]
+fn test_administrative_actions_emit_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let recovery = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(
+        &admin,
+        &oracle,
+        &treasury,
+        &500u32,
+        &None,
+        &Some(recovery.clone()),
+    );
+    assert_event(
+        &env,
+        &contract_id,
+        ContractInitialized {
+            admin: admin.clone(),
+            oracle: oracle.clone(),
+            treasury: treasury.clone(),
+            fee_bps: 500,
+            max_sponsors: MAX_SPONSORS,
+            recovery: Some(recovery.clone()),
+        },
+    );
+
+    client.pause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractPaused {
+            admin: admin.clone(),
+        },
+    );
+    client.unpause();
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUnpaused {
+            admin: admin.clone(),
+        },
+    );
+
+    let new_admin = Address::generate(&env);
+    client.set_admin(&new_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminChanged {
+            old_admin: admin,
+            new_admin: new_admin.clone(),
+        },
+    );
+
+    let recovered_admin = Address::generate(&env);
+    client.recover_admin(&recovered_admin);
+    assert_event(
+        &env,
+        &contract_id,
+        AdminRecovered {
+            recovery,
+            new_admin: recovered_admin.clone(),
+        },
+    );
+
+    let new_oracle = Address::generate(&env);
+    client.set_oracle(&new_oracle);
+    assert_event(
+        &env,
+        &contract_id,
+        OracleChanged {
+            old_oracle: oracle,
+            new_oracle,
+        },
+    );
+
+    let new_treasury = Address::generate(&env);
+    client.set_treasury(&new_treasury);
+    assert_event(
+        &env,
+        &contract_id,
+        TreasuryChanged {
+            old_treasury: treasury,
+            new_treasury,
+        },
+    );
+    client.set_fee_bps(&1_000u32);
+    assert_event(
+        &env,
+        &contract_id,
+        FeeBpsChanged {
+            old_fee_bps: 500,
+            new_fee_bps: 1_000,
+        },
+    );
+
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(EscrowContract::__wasm());
+    client.upgrade(&wasm_hash);
+    assert_event(
+        &env,
+        &contract_id,
+        ContractUpgraded {
+            admin: recovered_admin,
+            wasm_hash,
+            version: CONTRACT_VERSION,
+        },
+    );
 }
 
 #[test]
@@ -162,7 +390,7 @@ fn test_release_with_zero_fee_pays_full_amount() {
     let treasury = Address::generate(&env);
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &oracle, &treasury, &0u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &0u32, &None, &None);
 
     let token_admin = Address::generate(&env);
     let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
@@ -373,7 +601,7 @@ fn test_adversarial_ordering_resistance() {
     let client = crate::EscrowContractClient::new(&env, &contract_id);
 
     // Initialize with 0% fee to simplify fraction/dust calculations
-    client.initialize(&admin, &oracle, &treasury, &0u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &0u32, &None, &None);
 
     // 2. Create recipient addresses
     let dev1 = Address::generate(&env);
@@ -438,7 +666,7 @@ fn test_large_split_distributes_dust_by_largest_remainder() {
     let contract_id = env.register(crate::EscrowContract, ());
     let client = crate::EscrowContractClient::new(&env, &contract_id);
     // 0% fee so the whole total is distributable.
-    client.initialize(&admin, &oracle, &treasury, &0u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &0u32, &None, &None);
 
     // 60 recipients: 59 with alternating 160/170 bps, the last one receiving
     // the leftover of 10000. All 170-bps recipients share an identical
@@ -527,7 +755,7 @@ fn test_initialize_requires_admin_auth() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    let result = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None);
+    let result = client.try_initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert!(result.is_err());
 }
 
@@ -1004,7 +1232,7 @@ fn test_initialize_accepts_a_custom_max_sponsors() {
     let treasury = Address::generate(&env);
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &oracle, &treasury, &500u32, &Some(2u32));
+    client.initialize(&admin, &oracle, &treasury, &500u32, &Some(2u32), &None);
 
     assert_eq!(client.get_max_sponsors(), 2u32);
 
@@ -1067,7 +1295,14 @@ fn test_extend_deadline_dust_contributor_cannot_lock_out_permissionless_refund()
     asset_client.mint(&attacker, &1i128);
 
     env.ledger().set_timestamp(100);
-    client.fund(&108u64, &sponsor, &token_addr, &10_000_000_000i128, &200u64, &None);
+    client.fund(
+        &108u64,
+        &sponsor,
+        &token_addr,
+        &10_000_000_000i128,
+        &200u64,
+        &None,
+    );
 
     // Attacker contributes 1 stroop and tries to push the deadline out
     // forever.
@@ -1318,7 +1553,7 @@ fn test_oracle_is_stored_and_rotatable() {
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &oracle, &treasury, &500u32, &None);
+    client.initialize(&admin, &oracle, &treasury, &500u32, &None, &None);
     assert_eq!(client.get_oracle(), oracle);
     assert_eq!(client.get_version(), 1);
 
@@ -2283,7 +2518,14 @@ fn test_extend_deadline_returns_contribution_not_found_when_archived() {
     asset_client.mint(&sponsor, &10_000_000_000i128);
 
     env.ledger().set_timestamp(100);
-    client.fund(&701u64, &sponsor, &token_addr, &10_000_000_000i128, &200u64, &None);
+    client.fund(
+        &701u64,
+        &sponsor,
+        &token_addr,
+        &10_000_000_000i128,
+        &200u64,
+        &None,
+    );
 
     // Remove contribution sub-record to simulate archived persistent storage
     env.as_contract(&client.address, || {
@@ -2352,7 +2594,11 @@ fn test_release_with_treasury_as_recipient() {
 
     // Treasury as one of the recipients — fee transfer and recipient transfer
     // are separate calls; treasury must receive fee + share without double-counting.
-    let recipients = vec![&env, (alice.clone(), 5_000u32), (treasury.clone(), 5_000u32)];
+    let recipients = vec![
+        &env,
+        (alice.clone(), 5_000u32),
+        (treasury.clone(), 5_000u32),
+    ];
     client.release(&201u64, &recipients);
 
     let distributable = 950_0000000i128; // after 5% fee
@@ -2422,7 +2668,9 @@ fn test_upgrade_bumps_version_flag() {
 
     // upload_wasm returns the same hash as the current wasm — good enough to
     // verify the version flag is re-written without a real new binary.
-    let wasm_hash = env.deployer().upload_contract_wasm(EscrowContract::__wasm());
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(EscrowContract::__wasm());
     client.upgrade(&wasm_hash);
 
     assert_eq!(client.get_version(), 1u32); // flag refreshed, value unchanged
@@ -2439,9 +2687,18 @@ fn test_upgrade_preserves_existing_escrows() {
     let sponsor = Address::generate(&env);
     asset_client.mint(&sponsor, &5_000_000_000i128);
 
-    client.fund(&300u64, &sponsor, &token_addr, &5_000_000_000i128, &2_000u64, &None);
+    client.fund(
+        &300u64,
+        &sponsor,
+        &token_addr,
+        &5_000_000_000i128,
+        &2_000u64,
+        &None,
+    );
 
-    let wasm_hash = env.deployer().upload_contract_wasm(EscrowContract::__wasm());
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(EscrowContract::__wasm());
     client.upgrade(&wasm_hash);
 
     // Escrow data must survive the upgrade intact.
@@ -2480,7 +2737,6 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
     assert_eq!(client.get_admin(), third_admin);
 }
 
-
 // ── ArithmeticOverflow coverage ───────────────────────────────────────────────
 
 /// Minimal token whose balances can be set directly, so a test can make the
@@ -2502,10 +2758,7 @@ mod overflow_token {
     #[contractimpl]
     impl OverflowToken {
         pub fn balance(env: Env, id: Address) -> i128 {
-            env.storage()
-                .instance()
-                .get(&Key::Balance(id))
-                .unwrap_or(0)
+            env.storage().instance().get(&Key::Balance(id)).unwrap_or(0)
         }
 
         pub fn set_balance(env: Env, id: Address, amount: i128) {
@@ -2524,9 +2777,7 @@ mod overflow_token {
 /// Funds issue 900 with `i128::MAX` using `OverflowToken`, then resets the
 /// escrow contract's token balance to 0 so a later `contribute` measures a
 /// positive delta against an escrow total that cannot grow.
-fn setup_escrow_at_i128_max<'a>(
-    env: &'a Env,
-) -> (Address, EscrowContractClient<'a>, Address) {
+fn setup_escrow_at_i128_max<'a>(env: &'a Env) -> (Address, EscrowContractClient<'a>, Address) {
     let (contract_id, _admin, _treasury, client) = setup(env);
     let token_addr = env.register(overflow_token::OverflowToken, ());
     let token = overflow_token::OverflowTokenClient::new(env, &token_addr);

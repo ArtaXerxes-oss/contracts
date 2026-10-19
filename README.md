@@ -590,8 +590,13 @@ integration points:
    directly by the sponsor's wallet, not by the backend. The backend
    tracks funding status by polling the `get_escrow` / `get_milestone` /
    `get_pool` view functions (free simulated calls — no signing or fee
-   required) and/or by streaming the contract's diagnostic events from a
-   Soroban RPC event subscription. The view-function path is authoritative
+   required) and/or by streaming contract events from a Soroban RPC event
+   subscription. Escrow emits `EscrowFunded`, `EscrowContributed`,
+   `EscrowReleased` and `EscrowPaidTo`, `EscrowRefunded` and
+   `EscrowRefundPaid`, and `EscrowDeadlineExtended`; all escrow lifecycle
+   events include `issue_id` as an indexed topic. Administrative changes
+   (initialization, pause state, admin/oracle/treasury/fee changes, and
+   upgrades) are also emitted. The view-function path is authoritative
    — events are best-effort delivery and may be pruned by the RPC node.
 2. **On PR merged (GitHub webhook):** backend resolves which
    `issue_id`/`milestone_id` the merged PR is tied to, resolves the
@@ -624,12 +629,11 @@ or represented by a Stellar multisig / governance-controlled address.
 
 ### Prerequisites
 
-- Rust (this repo was built/tested against `rustc 1.95.0`).
+- Rust 1.95.0 (the version pinned in `rust-toolchain.toml` and used by CI).
 - The `wasm32v1-none` target for building deployable contract wasm:
   `rustup target add wasm32v1-none`.
   (Soroban's host requires this target rather than the legacy
-  `wasm32-unknown-unknown` on Rust 1.82+ — `soroban-sdk`'s build script
-  will tell you this explicitly if you try the wrong one.)
+  `wasm32-unknown-unknown`.)
 - [`stellar-cli`](https://developers.stellar.org/docs/tools/cli/install-cli)
   (the successor to `soroban-cli`) for `contract deploy` /
   `contract invoke` against testnet/mainnet. **Not installed in the
@@ -797,9 +801,6 @@ paths available where the contract supports them. See:
 - Extract shared split/fee math (`compute_split`) into a common
   non-contract Rust crate to remove the duplication between
   `mergefi-escrow` and `mergefi-milestones` noted above.
-- Emit contract events (`env.events().publish(...)`) on fund/release/refund
-  so the backend can index state changes from the ledger directly instead
-  of only polling `get_*` view calls.
 - Consider a timelock or multisig-admin wrapper for high-trust operations
   after the two-key contract-level admin/oracle split has been audited.
 - Support partial milestone/pool refunds and issue re-allocation

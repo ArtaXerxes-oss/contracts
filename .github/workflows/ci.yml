@@ -12,9 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.82.0
-        with:
-          components: rustfmt, clippy, llvm-tools-preview
+      - name: Install Rust toolchain
+        run: |
+          toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal \
+            --component rustfmt --component clippy --component llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
 
@@ -52,9 +54,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@1.82.0
-        with:
-          targets: wasm32v1-none
+      - name: Install Rust toolchain and wasm target
+        run: |
+          toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" wasm32v1-none
 
       - uses: Swatinem/rust-cache@v2
 
