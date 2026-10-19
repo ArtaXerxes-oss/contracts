@@ -351,6 +351,61 @@ fn is_paused_view(env) -> bool;
   paused (i.e. `pause` has been called and `unpause` has not). Unlike
   `pause`/`unpause` this does not require admin authorization.
 
+### When can sponsors get money back?
+
+Each contract has an admin-gated path that works at any time and a
+permissionless fallback that opens only after a fixed delay, so sponsors
+are protected even if the admin goes unresponsive. Funds on every path go
+back to the addresses on record — never to the caller.
+
+| Contract | Constant | Value |
+|---|---|---|
+| escrow | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| milestones | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| maintenance-pool | `INACTIVITY_WINDOW` | 90 days (`90 * 24 * 60 * 60` s) |
+| maintenance-pool | `MAX_DEPOSITS` | 50 deposits per pool |
+
+**Escrow — `refund(issue_id)`**
+
+- Before `deadline + GRACE_PERIOD`: admin-only (`require_auth` on the
+  stored admin).
+- At or after `deadline + GRACE_PERIOD`: callable by anyone, no auth.
+- Every contributor gets back exactly their own contributed amount.
+- Rejected once the escrow is `Paid` (`AlreadyPaid`) or `Refunded`
+  (`AlreadyRefunded`). Not blocked by `pause`.
+- `extend_deadline` moves `deadline` later, which pushes the
+  permissionless window back by the same amount.
+
+**Milestones — `cancel_milestone` / `cancel_milestone_after_deadline`**
+
+- `cancel_milestone`: admin-only, any time.
+- `cancel_milestone_after_deadline`: callable by anyone, no auth, but only
+  at or after `deadline + GRACE_PERIOD` (`DeadlineNotPassed` before
+  that). `create_milestone` rejects a `deadline` that is not in the
+  future, so this path can never be open from the start.
+- Both refund only `remaining_budget` (never-allocated funds), split
+  across contributors in proportion to what each put in, then close the
+  milestone. Funds still reserved by `allocate` for an unreleased issue
+  are *not* refunded — the admin must `deallocate` them first.
+- Rejected once the milestone is closed (`MilestoneClosed`). Not blocked
+  by `pause`.
+
+**Maintenance pool — `reclaim_deposit(pool_id, deposit_index, sponsor)`**
+
+- No admin path; each deposit is reclaimed individually by its original
+  sponsor (`sponsor.require_auth()`, `NotDepositSponsor` otherwise).
+- Allowed only once `now >= last_activity + INACTIVITY_WINDOW`, where
+  `last_activity = max(pool.last_withdraw_at, pool.created_at,
+  deposit.timestamp)` (`InactivityWindowNotElapsed` before that). Every
+  oracle `withdraw` sets `last_withdraw_at` and so restarts the window
+  for all deposits in the pool; a reclaim does not.
+- Returns the deposit's full original amount; partial reclaim isn't
+  supported, so it fails with `InsufficientBalance` if withdrawals have
+  left the pool below that amount. A deposit can be reclaimed only once
+  (`AlreadyReclaimed`). Not blocked by `pause`.
+- A pool holds at most `MAX_DEPOSITS` deposits (`TooManyDeposits` after
+  that), which bounds the number of separately reclaimable records.
+
 ## Data models
 
 ```rust
