@@ -204,16 +204,16 @@ fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
   own signature. Rejects `AlreadyPaid` / `AlreadyRefunded`. See
   `docs/refund-permissionless-analysis.md` for the economics/griefing
   analysis of the permissionless path.
-- `extend_deadline`: `caller.require_auth()`, and `caller` must be *any*
-  current contributor to the escrow (not necessarily the original `fund`
-  caller) — rejected with `Unauthorized` otherwise. Lets a contributor
-  push the shared `deadline` later if the group wants more time before
-  `refund`'s permissionless path opens — `new_deadline` must be strictly
-  later than both the stored deadline and the current ledger time, so it
-  can only delay that window, never shorten it. Rejects `AlreadyPaid` /
-  `AlreadyRefunded`. See `docs/escrow-crowdfunding-design.md` for why any
-  single contributor (rather than unanimous or weighted consent) can
-  extend. The record's persistent-storage TTL is scaled to (approximately)
+- `extend_deadline`: `caller.require_auth()`, and `caller` must be the
+  original sponsor (the `fund` caller, recorded as contribution index 0) —
+  any other contributor is rejected with `Unauthorized`, so someone who
+  contributes a dust amount cannot push the deadline out and lock every
+  other sponsor out of the permissionless `refund`. `new_deadline` must be
+  strictly later than both the stored deadline and the current ledger
+  time, and no later than `now + MAX_DEADLINE_EXTENSION` (365 days) —
+  `InvalidDeadline` otherwise. Rejects `AlreadyPaid` / `AlreadyRefunded`.
+  See `docs/escrow-crowdfunding-design.md` for why only the original
+  sponsor can extend. The record's persistent-storage TTL is scaled to (approximately)
   cover `new_deadline`, not just the flat ~29-day bump every other call
   applies — see "Data models" → "Storage & TTL" below for what that does
   and does not guarantee for a very far-future deadline.
@@ -353,6 +353,62 @@ fn is_paused_view(env) -> bool;
 - `is_paused_view`: read-only — returns `true` when the contract is
   paused (i.e. `pause` has been called and `unpause` has not). Unlike
   `pause`/`unpause` this does not require admin authorization.
+
+### When can sponsors get money back?
+
+Each contract has an admin-gated path that works at any time and a
+permissionless fallback that opens only after a fixed delay, so sponsors
+are protected even if the admin goes unresponsive. Funds on every path go
+back to the addresses on record — never to the caller.
+
+| Contract | Constant | Value |
+|---|---|---|
+| escrow | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| escrow | `MAX_DEADLINE_EXTENSION` | 365 days (`365 * 24 * 60 * 60` s) past the current ledger time |
+| milestones | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| maintenance-pool | `INACTIVITY_WINDOW` | 90 days (`90 * 24 * 60 * 60` s) |
+| maintenance-pool | `MAX_DEPOSITS` | 50 deposits per pool |
+
+**Escrow — `refund(issue_id)`**
+
+- Before `deadline + GRACE_PERIOD`: admin-only (`require_auth` on the
+  stored admin).
+- At or after `deadline + GRACE_PERIOD`: callable by anyone, no auth.
+- Every contributor gets back exactly their own contributed amount.
+- Rejected once the escrow is `Paid` (`AlreadyPaid`) or `Refunded`
+  (`AlreadyRefunded`). Not blocked by `pause`.
+- `extend_deadline` moves `deadline` later, which pushes the
+  permissionless window back by the same amount.
+
+**Milestones — `cancel_milestone` / `cancel_milestone_after_deadline`**
+
+- `cancel_milestone`: admin-only, any time.
+- `cancel_milestone_after_deadline`: callable by anyone, no auth, but only
+  at or after `deadline + GRACE_PERIOD` (`DeadlineNotPassed` before
+  that). `create_milestone` rejects a `deadline` that is not in the
+  future, so this path can never be open from the start.
+- Both refund only `remaining_budget` (never-allocated funds), split
+  across contributors in proportion to what each put in, then close the
+  milestone. Funds still reserved by `allocate` for an unreleased issue
+  are *not* refunded — the admin must `deallocate` them first.
+- Rejected once the milestone is closed (`MilestoneClosed`). Not blocked
+  by `pause`.
+
+**Maintenance pool — `reclaim_deposit(pool_id, deposit_index, sponsor)`**
+
+- No admin path; each deposit is reclaimed individually by its original
+  sponsor (`sponsor.require_auth()`, `NotDepositSponsor` otherwise).
+- Allowed only once `now >= last_activity + INACTIVITY_WINDOW`, where
+  `last_activity = max(pool.last_withdraw_at, pool.created_at,
+  deposit.timestamp)` (`InactivityWindowNotElapsed` before that). Every
+  oracle `withdraw` sets `last_withdraw_at` and so restarts the window
+  for all deposits in the pool; a reclaim does not.
+- Returns the deposit's full original amount; partial reclaim isn't
+  supported, so it fails with `InsufficientBalance` if withdrawals have
+  left the pool below that amount. A deposit can be reclaimed only once
+  (`AlreadyReclaimed`). Not blocked by `pause`.
+- A pool holds at most `MAX_DEPOSITS` deposits (`TooManyDeposits` after
+  that), which bounds the number of separately reclaimable records.
 
 ## Data models
 
@@ -537,8 +593,13 @@ integration points:
    directly by the sponsor's wallet, not by the backend. The backend
    tracks funding status by polling the `get_escrow` / `get_milestone` /
    `get_pool` view functions (free simulated calls — no signing or fee
-   required) and/or by streaming the contract's diagnostic events from a
-   Soroban RPC event subscription. The view-function path is authoritative
+   required) and/or by streaming contract events from a Soroban RPC event
+   subscription. Escrow emits `EscrowFunded`, `EscrowContributed`,
+   `EscrowReleased` and `EscrowPaidTo`, `EscrowRefunded` and
+   `EscrowRefundPaid`, and `EscrowDeadlineExtended`; all escrow lifecycle
+   events include `issue_id` as an indexed topic. Administrative changes
+   (initialization, pause state, admin/oracle/treasury/fee changes, and
+   upgrades) are also emitted. The view-function path is authoritative
    — events are best-effort delivery and may be pruned by the RPC node.
 2. **On PR merged (GitHub webhook):** backend resolves which
    `issue_id`/`milestone_id` the merged PR is tied to, resolves the
@@ -571,12 +632,11 @@ or represented by a Stellar multisig / governance-controlled address.
 
 ### Prerequisites
 
-- Rust (this repo was built/tested against `rustc 1.95.0`).
+- Rust 1.95.0 (the version pinned in `rust-toolchain.toml` and used by CI).
 - The `wasm32v1-none` target for building deployable contract wasm:
   `rustup target add wasm32v1-none`.
   (Soroban's host requires this target rather than the legacy
-  `wasm32-unknown-unknown` on Rust 1.82+ — `soroban-sdk`'s build script
-  will tell you this explicitly if you try the wrong one.)
+  `wasm32-unknown-unknown`.)
 - [`stellar-cli`](https://developers.stellar.org/docs/tools/cli/install-cli)
   (the successor to `soroban-cli`) for `contract deploy` /
   `contract invoke` against testnet/mainnet. **Not installed in the
@@ -750,9 +810,6 @@ paths available where the contract supports them. See:
 - Extract shared split/fee math (`compute_split`) into a common
   non-contract Rust crate to remove the duplication between
   `mergefi-escrow` and `mergefi-milestones` noted above.
-- Emit contract events (`env.events().publish(...)`) on fund/release/refund
-  so the backend can index state changes from the ledger directly instead
-  of only polling `get_*` view calls.
 - Consider a timelock or multisig-admin wrapper for high-trust operations
   after the two-key contract-level admin/oracle split has been audited.
 - Support partial milestone/pool refunds and issue re-allocation
