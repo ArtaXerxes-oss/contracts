@@ -2421,3 +2421,117 @@ fn test_set_admin_requires_current_and_new_admin_auth() {
     assert_eq!(client.get_admin(), third_admin);
 }
 
+
+// ── ArithmeticOverflow coverage ───────────────────────────────────────────────
+
+/// Minimal token whose balances can be set directly, so a test can make the
+/// escrow observe a positive transfer delta even though its recorded
+/// `escrow.amount` is already at `i128::MAX`. A real SAC can't be used to
+/// reach the `contribute` overflow: the contract's own token balance would
+/// overflow inside the SAC transfer first.
+mod overflow_token {
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+
+    #[contracttype]
+    enum Key {
+        Balance(Address),
+    }
+
+    #[contract]
+    pub struct OverflowToken;
+
+    #[contractimpl]
+    impl OverflowToken {
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage()
+                .instance()
+                .get(&Key::Balance(id))
+                .unwrap_or(0)
+        }
+
+        pub fn set_balance(env: Env, id: Address, amount: i128) {
+            env.storage().instance().set(&Key::Balance(id), &amount);
+        }
+
+        /// Credits `to` without debiting `from`; only the receiver's balance
+        /// delta matters to `measure_transfer_delta`.
+        pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
+            let balance = Self::balance(env.clone(), to.clone());
+            Self::set_balance(env, to, balance + amount);
+        }
+    }
+}
+
+/// Funds issue 900 with `i128::MAX` using `OverflowToken`, then resets the
+/// escrow contract's token balance to 0 so a later `contribute` measures a
+/// positive delta against an escrow total that cannot grow.
+fn setup_escrow_at_i128_max<'a>(
+    env: &'a Env,
+) -> (Address, EscrowContractClient<'a>, Address) {
+    let (contract_id, _admin, _treasury, client) = setup(env);
+    let token_addr = env.register(overflow_token::OverflowToken, ());
+    let token = overflow_token::OverflowTokenClient::new(env, &token_addr);
+
+    let sponsor = Address::generate(env);
+    client.fund(&900u64, &sponsor, &token_addr, &i128::MAX, &1_000u64, &None);
+    assert_eq!(client.get_escrow(&900u64).amount, i128::MAX);
+
+    token.set_balance(&contract_id, &0i128);
+    (sponsor, client, token_addr)
+}
+
+#[test]
+fn test_contribute_new_sponsor_escrow_total_overflow_returns_arithmetic_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_sponsor, client, _token) = setup_escrow_at_i128_max(&env);
+
+    // A new sponsor skips the per-contribution checked_add and hits the
+    // escrow-total checked_add.
+    let other = Address::generate(&env);
+    let err = client.try_contribute(&900u64, &other, &1i128);
+    assert_eq!(err, Err(Ok(Error::ArithmeticOverflow)));
+
+    let escrow = client.get_escrow(&900u64);
+    assert_eq!(escrow.amount, i128::MAX);
+    assert_eq!(escrow.contributor_count, 1);
+}
+
+#[test]
+fn test_contribute_existing_sponsor_overflow_returns_arithmetic_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (sponsor, client, _token) = setup_escrow_at_i128_max(&env);
+
+    // The original sponsor topping up hits the per-contribution checked_add.
+    let err = client.try_contribute(&900u64, &sponsor, &1i128);
+    assert_eq!(err, Err(Ok(Error::ArithmeticOverflow)));
+
+    assert_eq!(client.get_contribution(&900u64, &0u32).amount, i128::MAX);
+    assert_eq!(client.get_escrow(&900u64).amount, i128::MAX);
+}
+
+#[test]
+fn test_release_fee_overflow_returns_arithmetic_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &i128::MAX);
+    client.fund(&901u64, &sponsor, &token_addr, &i128::MAX, &1_000u64, &None);
+
+    // i128::MAX * 500 (fee_bps) overflows inside compute_split.
+    let recipient = Address::generate(&env);
+    let recipients = vec![&env, (recipient.clone(), 10_000u32)];
+    let err = client.try_release(&901u64, &recipients);
+    assert_eq!(err, Err(Ok(Error::ArithmeticOverflow)));
+
+    let escrow = client.get_escrow(&901u64);
+    assert_eq!(escrow.status, EscrowStatus::Funded);
+    assert_eq!(escrow.amount, i128::MAX);
+    assert_eq!(token_client.balance(&recipient), 0);
+    assert_eq!(token_client.balance(&treasury), 0);
+}
