@@ -203,16 +203,16 @@ fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
   own signature. Rejects `AlreadyPaid` / `AlreadyRefunded`. See
   `docs/refund-permissionless-analysis.md` for the economics/griefing
   analysis of the permissionless path.
-- `extend_deadline`: `caller.require_auth()`, and `caller` must be *any*
-  current contributor to the escrow (not necessarily the original `fund`
-  caller) — rejected with `Unauthorized` otherwise. Lets a contributor
-  push the shared `deadline` later if the group wants more time before
-  `refund`'s permissionless path opens — `new_deadline` must be strictly
-  later than both the stored deadline and the current ledger time, so it
-  can only delay that window, never shorten it. Rejects `AlreadyPaid` /
-  `AlreadyRefunded`. See `docs/escrow-crowdfunding-design.md` for why any
-  single contributor (rather than unanimous or weighted consent) can
-  extend. The record's persistent-storage TTL is scaled to (approximately)
+- `extend_deadline`: `caller.require_auth()`, and `caller` must be the
+  original sponsor (the `fund` caller, recorded as contribution index 0) —
+  any other contributor is rejected with `Unauthorized`, so someone who
+  contributes a dust amount cannot push the deadline out and lock every
+  other sponsor out of the permissionless `refund`. `new_deadline` must be
+  strictly later than both the stored deadline and the current ledger
+  time, and no later than `now + MAX_DEADLINE_EXTENSION` (365 days) —
+  `InvalidDeadline` otherwise. Rejects `AlreadyPaid` / `AlreadyRefunded`.
+  See `docs/escrow-crowdfunding-design.md` for why only the original
+  sponsor can extend. The record's persistent-storage TTL is scaled to (approximately)
   cover `new_deadline`, not just the flat ~29-day bump every other call
   applies — see "Data models" → "Storage & TTL" below for what that does
   and does not guarantee for a very far-future deadline.
@@ -361,6 +361,7 @@ back to the addresses on record — never to the caller.
 | Contract | Constant | Value |
 |---|---|---|
 | escrow | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
+| escrow | `MAX_DEADLINE_EXTENSION` | 365 days (`365 * 24 * 60 * 60` s) past the current ledger time |
 | milestones | `GRACE_PERIOD` | 14 days (`14 * 24 * 60 * 60` s) |
 | maintenance-pool | `INACTIVITY_WINDOW` | 90 days (`90 * 24 * 60 * 60` s) |
 | maintenance-pool | `MAX_DEPOSITS` | 50 deposits per pool |
