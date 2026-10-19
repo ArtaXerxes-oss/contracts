@@ -11,6 +11,18 @@ change, not backfilled later.
 
 ## [Unreleased]
 
+### Changed
+- **ABI change**: Removed unused `Unauthorized` error variant (code 3) from
+  `milestones` and `maintenance-pool` contracts. These variants were declared
+  but never constructed — authorization failures use Soroban's
+  `require_auth()` host trap instead of returning an error. All subsequent
+  error codes have been renumbered downward by 1. Also fixed duplicate
+  error code 21 in `milestones` (`DeadlinePassed` and `DeadlineInPast` both
+  used 21; now `DeadlinePassed` = 21, `DeadlineInPast` = 22). The `escrow`
+  contract's `Unauthorized` variant remains (used in `extend_deadline`).
+  Update client-side error decoders (`scripts/error-codes.mjs`) accordingly.
+  (#319)
+
 ### Added
 - `CODEOWNERS`, pinning `contracts/`, `docs/` and `scripts/` review to the
   maintainer for automatic reviewer assignment on the high volume of
