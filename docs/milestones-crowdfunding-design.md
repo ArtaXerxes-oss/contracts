@@ -102,14 +102,14 @@ inline on `Milestone`. Two reasons, unchanged from escrow:
    history, even for operations (`allocate`, `release_issue`) that never
    look at it.
 2. **No unbounded growth.** `max_sponsors` (an optional `initialize`
-   parameter, defaulting to the `MAX_SPONSORS` constant, 20, when omitted)
+   parameter, defaulting to the `MAX_SPONSORS` constant, 20, when omitted
+   and capped at 50)
    caps `contributor_count`, so `cancel_milestone`'s (and any future
    timeout wind-down's) per-contributor loop — and, critically, the
    refund's dust distribution — is bounded by a small, per-deployment-
-   tunable constant regardless of how popular a release gets. A $50,000
-   release milestone expecting far more participation than a single-issue
-   bounty can raise the cap at `initialize` time instead of needing a
-   contract redeploy (#96).
+   tunable constant regardless of how popular a release gets. A release
+   milestone with unusually high participation can raise the cap to at most
+   50 at `initialize` time instead of needing a contract redeploy (#96, #449).
 
 ## Authorization
 

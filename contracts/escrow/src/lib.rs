@@ -15,7 +15,7 @@ mod types;
 mod test;
 
 use error::Error;
-use mergefi_common::{BPS_DENOMINATOR, MAX_SPONSORS};
+use mergefi_common::{BPS_DENOMINATOR, MAX_SPONSORS, MAX_SPONSORS_LIMIT};
 use soroban_sdk::{contract, contractevent, contractimpl, token, Address, BytesN, Env, Vec};
 use types::{Contribution, DataKey, Escrow, EscrowStatus};
 
@@ -206,7 +206,8 @@ mod contract {
         ///
         /// `max_sponsors` caps how many distinct contributions a single escrow
         /// may accumulate (see `contribute`); pass `None` to use the default
-        /// `MAX_SPONSORS` (20).
+        /// `MAX_SPONSORS` (20). Custom values may not exceed
+        /// `MAX_SPONSORS_LIMIT` (50), keeping contributor loops bounded.
         pub fn initialize(
             env: Env,
             admin: Address,
@@ -228,12 +229,15 @@ mod contract {
             if treasury == env.current_contract_address() {
                 return Err(Error::InvalidTreasury);
             }
+            let max_sponsors = max_sponsors.unwrap_or(MAX_SPONSORS);
+            if max_sponsors > MAX_SPONSORS_LIMIT {
+                return Err(Error::InvalidMaxSponsors);
+            }
 
             env.storage().instance().set(&DataKey::Admin, &admin);
             env.storage().instance().set(&DataKey::Oracle, &oracle);
             env.storage().instance().set(&DataKey::Treasury, &treasury);
             env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-            let max_sponsors = max_sponsors.unwrap_or(MAX_SPONSORS);
             env.storage()
                 .instance()
                 .set(&DataKey::MaxSponsors, &max_sponsors);

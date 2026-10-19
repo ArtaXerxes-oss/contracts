@@ -110,7 +110,8 @@ pub fn compute_split(
         .ok_or(SplitError::Overflow)?;
     if dust > 0 {
         sort_remainders_desc(&mut order);
-        for k in 0..dust as u32 {
+        let dust = u32::try_from(dust).map_err(|_| SplitError::Overflow)?;
+        for k in 0..dust {
             let (index, _, _) = order.get(k).unwrap();
             let (recipient, share) = shares.get(index).unwrap();
             shares.set(

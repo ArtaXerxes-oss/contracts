@@ -184,7 +184,7 @@ fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
   (`Contribution { sponsor, amount }`, queryable via `get_contribution`)
   so `refund` can return each sponsor's own amount to their own address.
   Capped at `max_sponsors` (an optional `initialize` parameter, defaulting
-  to `MAX_SPONSORS`, 20) distinct contributions per escrow
+  to `MAX_SPONSORS`, 20, and limited to 50) distinct contributions per escrow
   (`TooManySponsors` otherwise). Rejects `AlreadyPaid` / `AlreadyRefunded`.
   See `docs/escrow-crowdfunding-design.md` for the full design reasoning.
 - `release`: oracle-only (`require_auth` on the stored oracle address).
@@ -278,8 +278,9 @@ fn set_treasury(env, new_treasury: Address) -> Result<(), Error>;
   }`, queryable via `get_contribution`, with the original funder always
   at index 0) so a cancellation refund can return each sponsor's
   proportional share to their own address. Capped at `max_sponsors` (an
-  optional `initialize` parameter, defaulting to `MAX_SPONSORS`, 20)
-  distinct contributions per milestone (`TooManySponsors` otherwise).
+  optional `initialize` parameter, defaulting to `MAX_SPONSORS`, 20) and
+  limited to 50 distinct contributions per milestone (`TooManySponsors`
+  otherwise).
   Rejects `MilestoneClosed`. See
   `docs/milestones-crowdfunding-design.md` for the full design reasoning.
 - `allocate`: admin-only. Reserves a slice of `remaining_budget` for a
@@ -708,6 +709,9 @@ Stellar-side problem), so `scripts/deploy.mjs` and `scripts/invoke.mjs`
 (thin wrappers around `@stellar/stellar-sdk`) were used instead to
 perform the same upload → create-contract → initialize flow the CLI
 would otherwise do.
+For payout methods such as `release` and `release_issue`, `invoke.mjs`
+accepts recipient splits as `recipients:<address>=<bps>,<address>=<bps>`
+(for example, `recipients:G...=7000,G...=3000`).
 
 | Contract | Contract ID | Stellar Expert |
 |---|---|---|

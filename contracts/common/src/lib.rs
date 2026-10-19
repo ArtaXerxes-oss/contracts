@@ -15,6 +15,10 @@ pub use split::{compute_split, sort_remainders_desc, Payouts, SplitError};
 #[cfg(test)]
 mod test_fuzz;
 
+/// Maximum accepted per-contract sponsor cap. This keeps contributor loops
+/// within a predictable resource budget even when deployments customize it.
+pub const MAX_SPONSORS_LIMIT: u32 = 50;
+
 /// Trait to identify the Admin key for a contract's DataKey enum.
 pub trait AdminKey {
     /// Returns the storage key for the admin address.

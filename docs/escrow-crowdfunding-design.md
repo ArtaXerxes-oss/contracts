@@ -56,16 +56,16 @@ Two reasons:
    don't need it at all. Per-index entries keep `Escrow` itself small and
    let `refund`/`extend_deadline` read only what they need.
 2. **No unbounded growth.** `max_sponsors` (an optional `initialize`
-   parameter, defaulting to the `MAX_SPONSORS` constant, 20, when omitted)
+   parameter, defaulting to the `MAX_SPONSORS` constant, 20, when omitted
+   and capped at 50)
    caps `contributor_count`, so `refund`'s and `extend_deadline`'s
    per-contributor loops are bounded by a small, per-deployment-tunable
    constant regardless of how popular a bounty gets — directly addressing
    the same resource concern #8/#9 raise for `recipients`/`allocations`
-   elsewhere in this codebase. Twenty is generous enough for any realistic
-   crowdfunding scenario for a single GitHub issue while keeping the
-   worst-case loop (and its Stellar resource cost) small and predictable;
-   a deployment expecting unusually high participation can raise the cap
-   at `initialize` time instead of needing a contract redeploy (#96).
+   elsewhere in this codebase. The default of 20 is generous enough for
+   realistic crowdfunding on a single GitHub issue; deployments can raise
+   it to at most 50 at `initialize` time, keeping the worst-case loop (and
+   its Stellar resource cost) bounded without requiring a redeploy (#96, #448).
 
 Because each contribution is recorded as an *exact* amount rather than a
 percentage, `refund` needs no proportional-split math at all: it iterates
@@ -107,4 +107,3 @@ arbitrarily far out in one call. It can be extended again later, still
 only up to 365 days ahead of that later call. The admin's independent
 early-refund path (`refund` before `deadline + GRACE_PERIOD`, admin-only)
 remains available as an escape hatch.
-

@@ -45,4 +45,6 @@ pub enum Error {
     DeadlineInPast = 22,
     /// The stored contract version does not match the requested migration source.
     InvalidVersion = 23,
+    /// `initialize` supplied a sponsor cap above `MAX_SPONSORS_LIMIT`.
+    InvalidMaxSponsors = 24,
 }

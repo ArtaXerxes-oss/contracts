@@ -22,7 +22,7 @@ use error::Error;
 use soroban_sdk::{contract, contractimpl, token, Address, BytesN, Env, Map, Vec};
 use types::{Contribution, DataKey, IssueStatus, Milestone};
 
-use mergefi_common::{BPS_DENOMINATOR, MAX_SPONSORS};
+use mergefi_common::{BPS_DENOMINATOR, MAX_SPONSORS, MAX_SPONSORS_LIMIT};
 
 /// Minimum grace period (in seconds) after the deadline before anyone can
 /// permissionlessly trigger a cancel_milestone. Mirrors escrow's
@@ -53,7 +53,8 @@ mod contract {
         ///
         /// `max_sponsors` caps how many distinct contributions a single
         /// milestone may accumulate (see `contribute`); pass `None` to use the
-        /// default `MAX_SPONSORS` (20).
+        /// default `MAX_SPONSORS` (20). Custom values may not exceed
+        /// `MAX_SPONSORS_LIMIT` (50), keeping contributor loops bounded.
         pub fn initialize(
             env: Env,
             admin: Address,
@@ -75,13 +76,17 @@ mod contract {
             if treasury == env.current_contract_address() {
                 return Err(Error::InvalidTreasury);
             }
+            let max_sponsors = max_sponsors.unwrap_or(MAX_SPONSORS);
+            if max_sponsors > MAX_SPONSORS_LIMIT {
+                return Err(Error::InvalidMaxSponsors);
+            }
             env.storage().instance().set(&DataKey::Admin, &admin);
             env.storage().instance().set(&DataKey::Oracle, &oracle);
             env.storage().instance().set(&DataKey::Treasury, &treasury);
             env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
             env.storage()
                 .instance()
-                .set(&DataKey::MaxSponsors, &max_sponsors.unwrap_or(MAX_SPONSORS));
+                .set(&DataKey::MaxSponsors, &max_sponsors);
             env.storage()
                 .instance()
                 .set(&DataKey::Version, &CONTRACT_VERSION);
@@ -957,7 +962,8 @@ fn refund_remaining_budget(
         .ok_or(Error::ArithmeticOverflow)?;
     if dust > 0 {
         mergefi_common::sort_remainders_desc(&mut order);
-        for k in 0..dust as u32 {
+        let dust = u32::try_from(dust).map_err(|_| Error::ArithmeticOverflow)?;
+        for k in 0..dust {
             let (index, _, _) = order.get(k).unwrap();
             let (recipient, share) = shares.get(index).unwrap();
             shares.set(

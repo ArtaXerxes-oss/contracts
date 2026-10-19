@@ -7,6 +7,7 @@ import {
   Address,
   nativeToScVal,
   rpc,
+  xdr,
 } from "@stellar/stellar-sdk";
 import { submitAndWait } from "./lib/submit.mjs";
 import { formatError } from "./error-codes.mjs";
@@ -35,6 +36,27 @@ export function parseArg(raw) {
 
   const [type, value] = raw.split(":");
   if (type === "address") return nativeToScVal(new Address(value), { type: "address" });
+  if (type === "recipients") {
+    if (!value) {
+      throw new Error("Invalid recipients argument: expected address=u32,...");
+    }
+
+    const recipients = value.split(",").map((entry) => {
+      const [address, bps, ...extra] = entry.split("=");
+      if (!address || !bps || extra.length > 0 || !/^\d+$/.test(bps)) {
+        throw new Error(`Invalid recipients entry: ${entry}`);
+      }
+      const share = Number(bps);
+      if (!Number.isSafeInteger(share) || share > 0xffffffff) {
+        throw new Error(`Recipient basis points must fit u32: ${bps}`);
+      }
+      return xdr.ScVal.scvVec([
+        nativeToScVal(new Address(address), { type: "address" }),
+        nativeToScVal(share, { type: "u32" }),
+      ]);
+    });
+    return xdr.ScVal.scvVec(recipients);
+  }
   if (type === "u32") return nativeToScVal(parseInt(value, 10), { type: "u32" });
   if (type === "u64") return nativeToScVal(BigInt(value), { type: "u64" });
   if (type === "i128" || type === "some-i128") {
