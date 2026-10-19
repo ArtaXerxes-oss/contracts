@@ -2448,6 +2448,8 @@ fn test_upgrade_preserves_existing_escrows() {
     let escrow = client.get_escrow(&300u64);
     assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
     assert_eq!(escrow.deadline, 2_000u64);
+}
+
 #[test]
 fn test_set_admin_updates_admin() {
     let env = Env::default();

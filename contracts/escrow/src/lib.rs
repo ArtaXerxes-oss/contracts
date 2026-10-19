@@ -775,6 +775,8 @@ mod contract {
 }
 } // mod contract
 
+pub use contract::*;
+
 pub(crate) fn require_admin(env: &Env) -> Result<Address, Error> {
     mergefi_common::require_admin::<DataKey>(env).ok_or(Error::NotInitialized)
 }
