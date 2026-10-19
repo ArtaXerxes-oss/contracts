@@ -26,6 +26,11 @@ const CONTRACT_VERSION: u32 = 1;
 /// This prevents a race condition where a legitimate release in-flight near the deadline gets front-run by a refund.
 pub const GRACE_PERIOD: u64 = 14 * 24 * 60 * 60; // 14 days
 
+/// Furthest into the future (relative to the current ledger time) that
+/// `extend_deadline` may push an escrow's deadline. Bounds how long the
+/// permissionless `refund` window can be postponed by a single call.
+pub const MAX_DEADLINE_EXTENSION: u64 = 365 * 24 * 60 * 60; // 365 days
+
 // The `#[contract]` and `#[contractimpl]` macros generate additional items
 // (instance storage fields, spec functions, client methods, arg helpers)
 // that rustdoc sees but that aren't annotated here. Suppress the lint for
@@ -421,18 +426,19 @@ mod contract {
         Ok(())
     }
 
-    /// Pushes `issue_id`'s deadline further into the future. Callable by
-    /// `caller`, who must be *any* current contributor to this escrow (not
-    /// necessarily the original `fund` caller) — extending only ever
-    /// delays `refund`'s permissionless path, never redirects funds or
-    /// changes anyone's share, so it doesn't require unanimous or
-    /// contribution-weighted consent from every contributor. See
+    /// Pushes `issue_id`'s deadline further into the future. Callable only
+    /// by `caller` == the original sponsor (the `fund` caller, recorded as
+    /// `Contribution` index 0); any other contributor is rejected with
+    /// `Unauthorized`. Letting any contributor extend allowed a griefing
+    /// attack: contribute 1 stroop, then push the deadline to `u64::MAX`,
+    /// locking every other sponsor out of the permissionless `refund`. See
     /// `docs/escrow-crowdfunding-design.md` for the full reasoning and
     /// `docs/refund-permissionless-analysis.md` for the original
-    /// single-sponsor analysis this generalizes. `new_deadline` must be
-    /// strictly later than both the current stored deadline and the
-    /// current ledger time, so this can only ever delay the permissionless
-    /// window, never shorten it. Blocked when paused (issue #14).
+    /// single-sponsor analysis. `new_deadline` must be strictly later than
+    /// both the current stored deadline and the current ledger time, so
+    /// this can only ever delay the permissionless window, never shorten
+    /// it, and no later than `now + MAX_DEADLINE_EXTENSION` (365 days),
+    /// otherwise `InvalidDeadline`. Blocked when paused (issue #14).
     ///
     /// # What setting a far-future `new_deadline` does and does not guarantee
     ///
@@ -480,24 +486,24 @@ mod contract {
             EscrowStatus::Funded => {}
         }
 
-        let mut is_contributor = false;
-        for i in 0..escrow.contributor_count {
-            let contribution_key = DataKey::Contribution(issue_id, i);
-            let contribution: Contribution = env
-                .storage()
-                .persistent()
-                .get(&contribution_key)
-                .ok_or(Error::ContributionNotFound)?;
-            if contribution.sponsor == caller {
-                is_contributor = true;
-                break;
-            }
-        }
-        if !is_contributor {
+        // Only the original sponsor (the `fund` caller, always stored at
+        // contribution index 0) may extend. A later contributor could
+        // otherwise grief every other sponsor by contributing a dust amount
+        // and pushing the deadline out indefinitely.
+        let original: Contribution = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Contribution(issue_id, 0))
+            .ok_or(Error::ContributionNotFound)?;
+        if original.sponsor != caller {
             return Err(Error::Unauthorized);
         }
 
-        if new_deadline <= escrow.deadline || new_deadline <= env.ledger().timestamp() {
+        let now = env.ledger().timestamp();
+        if new_deadline <= escrow.deadline
+            || new_deadline <= now
+            || new_deadline > now.saturating_add(MAX_DEADLINE_EXTENSION)
+        {
             return Err(Error::InvalidDeadline);
         }
 
@@ -768,6 +774,8 @@ mod contract {
     }
 }
 } // mod contract
+
+pub use contract::*;
 
 pub(crate) fn require_admin(env: &Env) -> Result<Address, Error> {
     mergefi_common::require_admin::<DataKey>(env).ok_or(Error::NotInitialized)

@@ -75,41 +75,36 @@ the way `compute_split`'s basis-point payouts have — the sum of what goes
 back out is definitionally exactly the sum of what came in, split exactly
 along the lines it arrived in.
 
-## `extend_deadline`: any current contributor, not unanimous or weighted consent
+## `extend_deadline`: original sponsor only, capped at 365 days
 
-Before this change, `extend_deadline` was gated by
+Before crowdfunding, `extend_deadline` was gated by
 `escrow.sponsor.require_auth()` — trivial with exactly one possible
-sponsor. With potentially many contributors, three shapes were considered:
+sponsor. With potentially many contributors, four shapes were considered:
 
+- **Any current contributor may extend.** Previously implemented, now
+  rejected: it is a griefing vector. Extending looks harmless because it
+  never redirects funds, but it postpones the permissionless `refund`
+  window — every other sponsor's only admin-independent exit. An attacker
+  could contribute 1 stroop and call
+  `extend_deadline(issue_id, attacker, u64::MAX - GRACE_PERIOD)`, leaving
+  a 10,000 USDC sponsor dependent on the admin's early refund forever.
 - **Unanimous consent** (every contributor must co-sign). Rejected: adds
   real coordination cost (gathering N on-chain signatures in one
-  transaction, or some multi-step approval flow that doesn't exist yet)
-  for a change that's Pareto-improving for the group in the common case
-  — see below.
-- **Contribution-weighted consent** (e.g. majority-by-amount). Rejected:
-  meaningfully more state and logic (weighted vote tallying, a threshold
-  constant to pick and justify) for a decision that doesn't obviously
-  need it — extending the deadline doesn't redistribute anyone's money
-  or change anyone's share, so weighting by contribution size doesn't
-  protect against anything a simpler rule doesn't already cover.
-- **Any current contributor may extend — implemented here.** The new
-  `caller: Address` parameter is checked against every recorded
-  `Contribution.sponsor` for that `issue_id`; if `caller` matches any of
-  them (and `caller.require_auth()` succeeds, so nobody can claim to be a
-  contributor they aren't), the extension is allowed. Reasoning:
-  extending only ever *delays* the point at which `refund`'s
-  permissionless path opens — it can never shorten it, redirect funds, or
-  change anyone's payout — and every contributor already staked into this
-  escrow overwhelmingly prefers "give the work more time to land and
-  trigger `release`" over "an earlier refund," since that's the entire
-  reason they contributed in the first place. A single contributor acting
-  unilaterally to give the group's shared bounty more time to succeed
-  isn't a scenario that needs the other contributors' explicit sign-off
-  the way, say, redirecting funds would. The admin's independent
-  early-refund path (`refund` before `deadline`, admin-only) remains
-  available as an escape hatch if an extension ever turns out to have
-  been unwarranted.
+  transaction, or a multi-step approval flow that doesn't exist yet).
+- **Contribution-weighted consent** (e.g. majority-by-amount). Rejected
+  for now: meaningfully more state and logic (vote tallying, a threshold
+  to pick and justify). It could be revisited if co-sponsors need a say.
+- **Original sponsor only — implemented here.** `caller` must equal
+  `Contribution(issue_id, 0).sponsor`, the address that called `fund`.
+  Contributions are append-only and never reordered, so index 0 is stable
+  for the escrow's lifetime. This matches the single-sponsor rule from
+  before crowdfunding: later contributors join on the original sponsor's
+  terms, and they cannot change those terms.
 
-This is a straightforward generalization of the existing single-sponsor
-rule ("the sponsor can extend") to "any of the (now possibly several)
-sponsors can extend," rather than a new, more restrictive mechanism.
+`new_deadline` is also capped at `now + MAX_DEADLINE_EXTENSION` (365
+days). Even the original sponsor cannot push the permissionless window
+arbitrarily far out in one call. It can be extended again later, still
+only up to 365 days ahead of that later call. The admin's independent
+early-refund path (`refund` before `deadline + GRACE_PERIOD`, admin-only)
+remains available as an escape hatch.
+

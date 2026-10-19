@@ -1027,7 +1027,7 @@ fn test_initialize_accepts_a_custom_max_sponsors() {
 }
 
 #[test]
-fn test_extend_deadline_any_contributor_can_extend_not_just_the_original_funder() {
+fn test_extend_deadline_rejects_later_contributor_only_original_sponsor_can_extend() {
     let env = Env::default();
     env.mock_all_auths();
     let (_, _admin, _treasury, client) = setup(&env);
@@ -1043,16 +1043,72 @@ fn test_extend_deadline_any_contributor_can_extend_not_just_the_original_funder(
     client.fund(&106u64, &alice, &token_addr, &5_000i128, &200u64, &None);
     client.contribute(&106u64, &bob, &5_000i128);
 
-    // Bob (the second contributor, not the original funder) extends.
-    client.extend_deadline(&106u64, &bob, &500u64);
-    assert_eq!(client.get_escrow(&106u64).deadline, 500u64);
+    // Bob (a later contributor, not the original funder) cannot extend.
+    let err = client.try_extend_deadline(&106u64, &bob, &500u64);
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.get_escrow(&106u64).deadline, 200u64);
 
-    // The old deadline (200) has passed, but the extended one (500) hasn't:
-    // refund must still require admin auth.
-    env.ledger().set_timestamp(300);
+    // Alice (the original sponsor) still can.
+    client.extend_deadline(&106u64, &alice, &500u64);
+    assert_eq!(client.get_escrow(&106u64).deadline, 500u64);
+}
+
+#[test]
+fn test_extend_deadline_dust_contributor_cannot_lock_out_permissionless_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000_000_000i128);
+    asset_client.mint(&attacker, &1i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&108u64, &sponsor, &token_addr, &10_000_000_000i128, &200u64, &None);
+
+    // Attacker contributes 1 stroop and tries to push the deadline out
+    // forever.
+    client.contribute(&108u64, &attacker, &1i128);
+    let err = client.try_extend_deadline(&108u64, &attacker, &(u64::MAX - crate::GRACE_PERIOD));
+    assert_eq!(err, Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.get_escrow(&108u64).deadline, 200u64);
+
+    // The permissionless refund still opens on schedule.
+    env.ledger().set_timestamp(200 + crate::GRACE_PERIOD);
     env.set_auths(&[]);
-    let result = client.try_refund(&106u64);
-    assert!(result.is_err());
+    client.refund(&108u64);
+    assert_eq!(token_client.balance(&sponsor), 10_000_000_000i128);
+    assert_eq!(token_client.balance(&attacker), 1i128);
+}
+
+#[test]
+fn test_extend_deadline_rejects_deadline_beyond_max_extension() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_, _admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let sponsor = Address::generate(&env);
+    asset_client.mint(&sponsor, &10_000i128);
+
+    env.ledger().set_timestamp(100);
+    client.fund(&109u64, &sponsor, &token_addr, &10_000i128, &200u64, &None);
+
+    let max = 100 + crate::MAX_DEADLINE_EXTENSION;
+
+    // Even the original sponsor cannot push past now + MAX_DEADLINE_EXTENSION.
+    let err = client.try_extend_deadline(&109u64, &sponsor, &(max + 1));
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+    let err = client.try_extend_deadline(&109u64, &sponsor, &u64::MAX);
+    assert_eq!(err, Err(Ok(Error::InvalidDeadline)));
+
+    // Exactly at the cap is allowed.
+    client.extend_deadline(&109u64, &sponsor, &max);
+    assert_eq!(client.get_escrow(&109u64).deadline, max);
 }
 
 #[test]
@@ -1342,12 +1398,13 @@ fn test_extend_deadline_caps_ttl_at_the_network_max_for_a_very_far_future_deadli
         &None,
     );
 
-    // 3 years out — the naive proportional ledger count for this would
-    // exceed what Soroban actually allows a single persistent entry to
+    // The furthest deadline allowed (MAX_DEADLINE_EXTENSION, 365 days) —
+    // plus GRACE_PERIOD, the naive proportional ledger count for this
+    // exceeds what Soroban actually allows a single persistent entry to
     // survive to. The record must still get *something* (the maximum this
     // call can grant), not silently fall back to the flat 29-day bump.
-    let three_years_secs: u64 = 3 * 365 * 24 * 60 * 60;
-    client.extend_deadline(&302u64, &sponsor, &three_years_secs);
+    let max_deadline: u64 = env.ledger().timestamp() + crate::MAX_DEADLINE_EXTENSION;
+    client.extend_deadline(&302u64, &sponsor, &max_deadline);
 
     let max_extend_to = env.ledger().max_live_until_ledger() - env.ledger().sequence();
     assert_eq!(escrow_ttl(&env, &contract_id, 302u64), max_extend_to);
@@ -2391,6 +2448,8 @@ fn test_upgrade_preserves_existing_escrows() {
     let escrow = client.get_escrow(&300u64);
     assert_eq!(escrow.status, crate::types::EscrowStatus::Funded);
     assert_eq!(escrow.deadline, 2_000u64);
+}
+
 #[test]
 fn test_set_admin_updates_admin() {
     let env = Env::default();
