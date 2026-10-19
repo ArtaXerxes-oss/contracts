@@ -60,20 +60,23 @@ export const errorMappings = {
   maintenancePool: {
     1: "AlreadyInitialized",
     2: "NotInitialized",
-    3: "Unauthorized",
-    4: "PoolNotFound",
-    5: "TokenMismatch",
-    6: "InvalidAmount",
-    7: "InsufficientBalance",
-    8: "InvalidFee",
-    9: "InvalidTreasury",
-    10: "InactivityWindowNotElapsed",
-    11: "NotDepositSponsor",
-    12: "DepositNotFound",
-    13: "ContractPaused",
-    14: "DepositCountOverflow",
-    15: "TooManyDeposits",
-    16: "ArithmeticOverflow"
+    3: "PoolNotFound",
+    4: "TokenMismatch",
+    5: "InvalidAmount",
+    6: "InsufficientBalance",
+    7: "InvalidFee",
+    8: "InvalidTreasury",
+    9: "InactivityWindowNotElapsed",
+    10: "NotDepositSponsor",
+    11: "DepositNotFound",
+    12: "ContractPaused",
+    13: "DepositCountOverflow",
+    14: "TooManyDeposits",
+    15: "AlreadyReclaimed",
+    16: "ArithmeticOverflow",
+    17: "InvalidSplit",
+    18: "SelfPayout",
+    19: "InvalidVersion"
   }
 };
 
