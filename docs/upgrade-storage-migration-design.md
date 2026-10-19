@@ -60,7 +60,7 @@ pub enum DataKey {
 }
 
 // Version tracking
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 
 fn get_contract_version(env: &Env) -> u32 {
     env.storage()
@@ -91,12 +91,7 @@ fn set_contract_version(env: &Env, version: u32) {
 ## Upgrade Function Specification
 
 ```rust
-/// Admin-gated upgrade function. Requires the stored `Admin` address's authorization.
-/// Calls `env.deployer().update_current_contract_wasm(new_wasm_hash)` to upgrade
-/// the contract code in place while preserving storage.
-///
-/// After upgrade, the new code should immediately check the stored `Version` and
-/// perform any necessary lazy migrations if old data is detected.
+/// Admin-gated code upgrade. The old code leaves `Version` unchanged.
 pub fn upgrade(
     env: Env,
     new_wasm_hash: soroban_sdk::BytesN<32>,
@@ -105,12 +100,37 @@ pub fn upgrade(
     admin.require_auth();
 
     env.deployer().update_current_contract_wasm(new_wasm_hash);
+    extend_instance_ttl(&env);
+    Ok(())
+}
+
+/// Admin-gated, idempotent migration in the newly installed code.
+pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
+    let admin = require_admin(&env).ok_or(Error::NotInitialized)?;
+    admin.require_auth();
+
+    let current_version = get_contract_version(&env);
+    if current_version == CONTRACT_VERSION {
+        extend_instance_ttl(&env);
+        return Ok(());
+    }
+    if current_version != from_version || from_version >= CONTRACT_VERSION {
+        return Err(Error::InvalidVersion);
+    }
+
     set_contract_version(&env, CONTRACT_VERSION);
     extend_instance_ttl(&env);
-
     Ok(())
 }
 ```
+
+The upgrade and migration are separate invocations because the upgrade
+transaction executes the old WASM. The old implementation must never stamp
+the new code's version. An operator should upload the new WASM, invoke
+`upgrade(new_wasm_hash)`, then invoke `migrate(from_version)` using the new
+contract interface, and confirm `get_version()` before resuming normal
+operations. Current contract code is version 2 and accepts the stored
+version as `from_version`; repeating the migration after success is harmless.
 
 ## Pause Mechanism Integration
 

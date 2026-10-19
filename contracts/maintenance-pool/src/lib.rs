@@ -37,7 +37,7 @@ pub const INACTIVITY_WINDOW: u64 = 90 * 24 * 60 * 60; // 90 days
 pub const MAX_DEPOSITS: u32 = 50;
 
 /// Current version of the storage schema. Incremented on breaking layout changes.
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 
 // The `#[contract]` and `#[contractimpl]` macros generate additional items
 // (instance storage fields, spec functions, client methods, arg helpers)
@@ -479,18 +479,40 @@ mod contract {
                 .unwrap_or(false)
         }
 
-        /// Upgrade the contract's wasm code. Requires admin authorization.
-        pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-            let admin = require_admin(&env)?;
-            admin.require_auth();
+    /// Upgrade the contract's wasm code. Requires admin authorization.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        admin.require_auth();
 
-            env.deployer().update_current_contract_wasm(new_wasm_hash);
-            env.storage()
-                .instance()
-                .set(&DataKey::Version, &CONTRACT_VERSION);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Apply storage migrations through this code version. Call after
+    /// `upgrade`; an already-migrated contract accepts a retry.
+    pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
+        require_admin(&env)?.require_auth();
+
+        let current_version = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::Version)
+            .unwrap_or(0);
+        if current_version == CONTRACT_VERSION {
             extend_instance_ttl(&env);
-            Ok(())
+            return Ok(());
         }
+        if current_version != from_version || from_version >= CONTRACT_VERSION {
+            return Err(Error::InvalidVersion);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &CONTRACT_VERSION);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
 
         /// Returns the maintenance pool record for `pool_id`.
         pub fn get_pool(env: Env, pool_id: u64) -> Result<MaintenancePool, Error> {

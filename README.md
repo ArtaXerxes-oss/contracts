@@ -155,6 +155,7 @@ fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
 fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
+fn migrate(env, from_version: u32) -> Result<(), Error>;
 fn get_escrow(env, issue_id: u64) -> Result<Escrow, Error>;
 fn get_contribution(env, issue_id: u64, index: u32) -> Result<Contribution, Error>;
 fn get_contributions(env, issue_id: u64) -> Result<Vec<Contribution>, Error>;
@@ -244,6 +245,7 @@ fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
 fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
+fn migrate(env, from_version: u32) -> Result<(), Error>;
 fn get_milestone(env, milestone_id: u64) -> Result<Milestone, Error>;
 fn get_issue_status(env, milestone_id: u64, issue_id: u64) -> Result<IssueStatus, Error>;
 fn get_contribution(env, milestone_id: u64, index: u32) -> Result<Contribution, Error>;
@@ -313,6 +315,7 @@ fn pause(env) -> Result<(), Error>;
 fn unpause(env) -> Result<(), Error>;
 fn is_paused_view(env) -> bool;
 fn upgrade(env, new_wasm_hash: BytesN<32>) -> Result<(), Error>;
+fn migrate(env, from_version: u32) -> Result<(), Error>;
 fn get_pool(env, pool_id: u64) -> Result<MaintenancePool, Error>;
 fn get_deposit(env, pool_id: u64, index: u32) -> Result<Deposit, Error>;
 fn get_admin(env) -> Result<Address, Error>;
@@ -728,27 +731,30 @@ working network access:
 
 ```sh
 stellar keys generate mergefi-admin --network testnet --fund
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/mergefi_escrow.wasm \
-  --source mergefi-admin \
-  --network testnet
-# then, e.g.
-stellar contract invoke \
-  --id <CONTRACT_ID> --source mergefi-admin --network testnet \
-  -- initialize --admin <ADMIN_G...> --oracle <ORACLE_G...> --treasury <TREASURY_G...> --fee_bps 250 --recovery none
+make deploy-escrow NETWORK=testnet SOURCE_ACCOUNT=mergefi-admin \
+  ADMIN=<ADMIN_G...> ORACLE=<ORACLE_G...> TREASURY=<TREASURY_G...> FEE_BPS=250
 ```
 
-Or, in an environment where the CLI's own network calls are blocked but
-plain Node.js `fetch` works (as was the case here):
+The deploy targets invoke `initialize` after creating the contract and stop
+with an error if initialization fails. Initialization arguments are required
+because the contracts have different optional parameters; the targets use
+`None` for optional sponsor caps and recovery addresses. This is two
+transactions, so production deployments should also verify the resulting
+contract's admin immediately after deployment.
 
 ```sh
-DEPLOYER_SECRET=<SECRET_KEY> node scripts/deploy.mjs target/wasm32v1-none/release/mergefi_escrow.wasm escrow
-INVOKER_SECRET=<SECRET_KEY> node scripts/invoke.mjs <CONTRACT_ID> initialize \
-  address:<ADMIN_G...> address:<TREASURY_G...> u32:250
-node scripts/deploy.mjs <SECRET_KEY> target/wasm32v1-none/release/mergefi_escrow.wasm escrow
-node scripts/invoke.mjs <SECRET_KEY> <CONTRACT_ID> initialize \
-  address:<ADMIN_G...> address:<ORACLE_G...> address:<TREASURY_G...> u32:250 none
+make deploy-escrow NETWORK=testnet SOURCE_ACCOUNT=mergefi-admin \
+  ADMIN=<ADMIN_G...> ORACLE=<ORACLE_G...> TREASURY=<TREASURY_G...> FEE_BPS=250
 ```
+
+### Generated TypeScript bindings
+
+Run `make bindings` to build the three optimized WASM contracts and generate
+the TypeScript clients under `bindings/`. The CI workflow uploads
+`typescript-contract-bindings-<commit-sha>` for every build and attaches
+`typescript-contract-bindings.tar.gz` to published GitHub releases. Backend
+consumers can download that artifact from the corresponding workflow run or
+release; it contains a separate generated npm package for each contract.
 
 Both scripts default to Stellar testnet but can be pointed at other networks
 via environment variables:
@@ -783,9 +789,12 @@ actions (`pause`, `unpause`, `upgrade`, and key rotation).
 
 `upgrade(new_wasm_hash)` is admin-gated and calls Soroban's
 `env.deployer().update_current_contract_wasm(...)`, preserving the current
-contract address and existing storage. Instance storage includes
-`DataKey::Version`, exposed through `get_version()`, so future versions can
-detect old layouts and run lazy or explicit migrations.
+contract address and existing storage. It does not change
+`DataKey::Version`: after installing the new WASM, call the new code's
+admin-only `migrate(from_version)` entrypoint. The migration rejects an
+unexpected source version and is safe to retry. `get_version()` reports the
+stored schema version; this release migrates existing version-1 instances
+to version 2.
 
 During an incident, admin can call `pause()` to block new deposits/funding
 and oracle-controlled payout paths while leaving refund/recovery-style

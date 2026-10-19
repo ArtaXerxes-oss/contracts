@@ -38,4 +38,6 @@ pub enum Error {
     InvalidSplit = 17,
     /// A recipient address equals the contract address — self-payout (#484).
     SelfPayout = 18,
+    /// The stored contract version does not match the requested migration source.
+    InvalidVersion = 19,
 }

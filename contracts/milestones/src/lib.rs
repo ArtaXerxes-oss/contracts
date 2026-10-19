@@ -31,7 +31,7 @@ use mergefi_common::{BPS_DENOMINATOR, MAX_SPONSORS};
 pub const GRACE_PERIOD: u64 = 14 * 24 * 60 * 60; // 14 days
 
 /// Current version of the storage schema. Incremented on breaking layout changes.
-const CONTRACT_VERSION: u32 = 1;
+const CONTRACT_VERSION: u32 = 2;
 
 // The `#[contract]` and `#[contractimpl]` macros generate additional items
 // (instance storage fields, spec functions, client methods, arg helpers)
@@ -564,8 +564,40 @@ mod contract {
             env.storage().persistent().set(&mkey, &milestone);
             extend_ttl(&env, &mkey);
 
-            env.storage().persistent().remove(&skey);
+    /// Upgrade the contract's wasm code. Requires admin authorization.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        let admin = require_admin(&env)?;
+        admin.require_auth();
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Apply storage migrations through this code version. Call after
+    /// `upgrade`; an already-migrated contract accepts a retry.
+    pub fn migrate(env: Env, from_version: u32) -> Result<(), Error> {
+        require_admin(&env)?.require_auth();
+
+        let current_version = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::Version)
+            .unwrap_or(0);
+        if current_version == CONTRACT_VERSION {
             extend_instance_ttl(&env);
+            return Ok(());
+        }
+        if current_version != from_version || from_version >= CONTRACT_VERSION {
+            return Err(Error::InvalidVersion);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &CONTRACT_VERSION);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
 
             Ok(())
         }

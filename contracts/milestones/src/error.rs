@@ -43,4 +43,6 @@ pub enum Error {
     DeadlinePassed = 22,
     /// The deadline supplied to `create_milestone` is in the past (issue #491).
     DeadlineInPast = 22,
+    /// The stored contract version does not match the requested migration source.
+    InvalidVersion = 23,
 }

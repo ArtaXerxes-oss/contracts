@@ -1,5 +1,6 @@
-# Pins the compiler version declared as the workspace MSRV. CI installs this
-# version from this file so local builds and CI use the same toolchain.
+# Pins the minimum Rust version declared by the workspace, matching what CI
+# uses (see .github/workflows/ci.yml) rather than leaving a contributor's local
+# toolchain to drift from whatever they happen to have installed.
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]

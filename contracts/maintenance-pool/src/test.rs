@@ -38,7 +38,7 @@ fn test_get_admin_treasury_fee_bps() {
     assert_eq!(client.get_admin(), admin);
     assert_eq!(client.get_treasury(), treasury);
     assert_eq!(client.get_fee_bps(), 1_000u32);
-    assert_eq!(client.get_version(), 1);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
 }
 
 #[test]
@@ -837,19 +837,39 @@ fn test_upgrade_requires_admin_auth() {
 }
 
 #[test]
-fn test_upgrade_bumps_version() {
+fn test_upgrade_requires_explicit_idempotent_migration() {
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, _treasury, client) = setup(&env);
 
-    // Simulate a deployment from before the current CONTRACT_VERSION.
+    // Simulate an initialized v1 instance before upgrading to this code.
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&DataKey::Version, &0u32);
+        env.storage().instance().set(&DataKey::Version, &1u32);
     });
-    assert_eq!(client.get_version(), 0);
+    assert_eq!(client.get_version(), 1);
 
     client.upgrade(&native_wasm_hash(&env));
+    assert_eq!(client.get_version(), 1);
+    client.migrate(&1u32);
     assert_eq!(client.get_version(), CONTRACT_VERSION);
+    client.migrate(&1u32);
+    assert_eq!(client.get_version(), CONTRACT_VERSION);
+}
+
+#[test]
+fn test_migrate_requires_admin_and_matching_source_version() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    env.set_auths(&[]);
+    assert!(client.try_migrate(&1u32).is_err());
+
+    env.mock_all_auths();
+    assert_eq!(
+        client.try_migrate(&0u32),
+        Err(Ok(Error::InvalidVersion))
+    );
 }
 
 #[test]
