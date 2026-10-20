@@ -989,6 +989,11 @@ mod contract {
             mergefi_common::get_fee_bps::<DataKey>(&env).ok_or(Error::NotInitialized)
         }
 
+        /// Admin-only: rotate the treasury address.
+        ///
+        /// Requires the current admin to authorize the change. The call rejects
+        /// an invalid treasury candidate (`InvalidTreasury`) and, once accepted,
+        /// routes all subsequent protocol-fee payouts to the updated treasury.
         pub fn set_treasury(env: Env, new_treasury: Address) -> Result<(), Error> {
             let admin = require_admin(&env)?;
             admin.require_auth();

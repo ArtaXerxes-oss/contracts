@@ -12,7 +12,7 @@ Older tagged releases are not actively patched. Please upgrade to the latest com
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Send a report by email to the maintainers listed in [CODEOWNERS](.github/CODEOWNERS) or use GitHub's private [Security Advisory](../../security/advisories/new) feature.
+Use GitHub's private [Security Advisory](../../security/advisories/new) feature for private disclosure. The repository does not publish an email address for security reports, and public issues or pull requests are not an acceptable disclosure channel.
 
 Include:
 
@@ -27,4 +27,4 @@ We will acknowledge receipt within **48 hours** and aim to provide a resolution 
 
 This policy covers all Soroban smart contracts under the `contracts/` directory of this repository.
 
-Off-chain tooling (`scripts/`, `bindings/`) is in scope for disclosure but carries lower severity by default.
+Off-chain tooling under `scripts/` is in scope for disclosure but carries lower severity by default. The repository does not maintain a `bindings/` directory, so it is intentionally out of scope until a concrete implementation exists.

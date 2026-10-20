@@ -32,8 +32,9 @@ pub struct Payouts {
 /// already has, e.g. `compute_split(..).map_err(|_| Error::InvalidSplit)?`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitError {
-    /// `recipients` was empty, or its basis-point shares don't sum to
-    /// exactly `BPS_DENOMINATOR` (10000 = 100%).
+    /// `recipients` was empty; any share is zero; a recipient address appears
+    /// more than once; or the basis-point shares don't sum to exactly
+    /// `BPS_DENOMINATOR` (10000 = 100%).
     InvalidSplit,
     /// A recipient address equals the contract's own address — a self-payout
     /// that would strand funds in the contract with no recovery path.
@@ -54,6 +55,19 @@ pub fn compute_split(
 ) -> Result<Payouts, SplitError> {
     if recipients.is_empty() {
         return Err(SplitError::InvalidSplit);
+    }
+
+    for i in 0..recipients.len() {
+        let (recipient, bps) = recipients.get(i).unwrap();
+        if bps == 0 {
+            return Err(SplitError::InvalidSplit);
+        }
+        for j in 0..i {
+            let (other_recipient, _) = recipients.get(j).unwrap();
+            if recipient == other_recipient {
+                return Err(SplitError::InvalidSplit);
+            }
+        }
     }
 
     let mut bps_sum: i128 = 0;

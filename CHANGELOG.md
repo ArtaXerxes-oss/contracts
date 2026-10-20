@@ -22,6 +22,19 @@ change, not backfilled later.
   contract's `Unauthorized` variant remains (used in `extend_deadline`).
   Update client-side error decoders (`scripts/error-codes.mjs`) accordingly.
   (#319)
+- `compute_split` now rejects zero-bps recipients and duplicate addresses with
+  `InvalidSplit`, and it rejects self-payouts before any transfer executes
+  (#425).
+- Added explicit overflow error handling for arithmetic-boundary failures and
+  surfaced the dedicated `ArithmeticOverflow` family of variants instead of
+  relying on a host abort (#429).
+- Enforced the per-contract `MAX_DEPOSITS`/`TooManyDeposits` cap and added the
+  dedicated error code used by sponsor contribution flows (#427).
+- Typed contribution lookup failures (`ContributionNotFound` / related typed
+  errors) are now surfaced consistently instead of falling back to generic
+  logic (#421, #422).
+- Reclaim-window logic now aligns with the actual post-deadline grace-period
+  behavior used by the refund/recovery path (#423).
 
 ### Added
 - `CODEOWNERS`, pinning `contracts/`, `docs/` and `scripts/` review to the
@@ -39,7 +52,7 @@ change, not backfilled later.
 Escrows gained multi-sponsor crowdfunding: several sponsors can contribute
 toward one escrow's funding target instead of a single sponsor funding it
 outright, with a permissionless refund path once the deadline plus
-`GRACE_PERIOD` has passed and the target wasn't met.
+`GRACE_PERIOD` has passed, regardless of whether the target was met.
 
 ### Pause / circuit-breaker mechanism (#14)
 `escrow`, `maintenance-pool`, and `milestones` each gained `pause`/`unpause`
