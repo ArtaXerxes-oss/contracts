@@ -42,7 +42,11 @@ pub struct Milestone {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Contribution {
     pub sponsor: Address,
+    /// Original amount contributed by this sponsor
     pub amount: i128,
+    /// Remaining unspent amount from this contribution (starts equal to `amount`,
+    /// decreases as releases are drawn from it FIFO)
+    pub remaining: i128,
     pub timestamp: u64,
 }
 

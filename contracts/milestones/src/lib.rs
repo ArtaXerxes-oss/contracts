@@ -274,7 +274,7 @@ mod contract {
                 oracle,
                 treasury,
                 fee_bps,
-                max_sponsors: max_sponsors.unwrap_or(MAX_SPONSORS),
+                max_sponsors,
                 recovery,
             }
             .publish(&env);
@@ -344,6 +344,7 @@ mod contract {
                 &Contribution {
                     sponsor: sponsor.clone(),
                     amount: actual_received,
+                    remaining: actual_received,
                     timestamp: env.ledger().timestamp(),
                 },
             );
@@ -456,6 +457,10 @@ mod contract {
                     .amount
                     .checked_add(actual_received)
                     .ok_or(Error::ArithmeticOverflow)?;
+                contribution.remaining = contribution
+                    .remaining
+                    .checked_add(actual_received)
+                    .ok_or(Error::ArithmeticOverflow)?;
                 contribution.timestamp = env.ledger().timestamp();
                 env.storage()
                     .persistent()
@@ -469,6 +474,7 @@ mod contract {
                     &Contribution {
                         sponsor: sponsor.clone(),
                         amount: actual_received,
+                        remaining: actual_received,
                         timestamp: env.ledger().timestamp(),
                     },
                 );
@@ -685,7 +691,33 @@ mod contract {
             // stay alive as individual issues are released over the milestone's
             // lifetime — release_issue doesn't touch contributions directly but
             // is called repeatedly on long-lived milestones.
+            //
+            // Deduct the release amount from contributions FIFO (first in, first out)
+            // to track each sponsor's unspent remainder for accurate refunds.
+            let mut to_deduct = amount;
             for i in 0..milestone.contributor_count {
+                if to_deduct <= 0 {
+                    break;
+                }
+                let contribution_key = DataKey::Contribution(milestone_id, i);
+                let mut contribution: Contribution = env
+                    .storage()
+                    .persistent()
+                    .get(&contribution_key)
+                    .ok_or(Error::MilestoneNotFound)?;
+                
+                let deduction = to_deduct.min(contribution.remaining);
+                contribution.remaining = contribution
+                    .remaining
+                    .checked_sub(deduction)
+                    .ok_or(Error::ArithmeticOverflow)?;
+                to_deduct = to_deduct
+                    .checked_sub(deduction)
+                    .ok_or(Error::ArithmeticOverflow)?;
+                
+                env.storage()
+                    .persistent()
+                    .set(&contribution_key, &contribution);
                 extend_ttl(&env, &DataKey::Contribution(milestone_id, i));
             }
             extend_instance_ttl(&env);
@@ -747,13 +779,11 @@ mod contract {
         /// Rejects if the issue is already Released (funds have left the
         /// contract) or not currently Allocated.
         ///
-        /// Blocked while the contract is paused, like `allocate`, since it
-        /// mutates the same allocation state.
+        /// Intentionally **not blocked** while paused, as it is a sponsor-protective
+        /// operation that moves funds back toward refund paths (see
+        /// docs/pause-circuit-breaker-design.md principle 1). During a pause,
+        /// sponsors can use deallocate + cancel_milestone to recover allocated funds.
         pub fn deallocate(env: Env, milestone_id: u64, issue_id: u64) -> Result<(), Error> {
-            if is_paused(&env) {
-                return Err(Error::ContractPaused);
-            }
-
             require_admin(&env)?.require_auth();
 
             let mkey = DataKey::Milestone(milestone_id);
@@ -1177,27 +1207,18 @@ mod contract {
 
 pub use contract::*;
 
-/// Pays each contributor their share of `milestone.remaining_budget` (the
-/// unallocated remainder of the pool), computed as
-/// `remaining_budget * contribution.amount / total_budget` — i.e. in
-/// proportion to what each sponsor actually put in, not to any nominal
-/// split of the original deposit. Because the contribution ledger is
-/// append-only and `total_budget` / `remaining_budget` are maintained
-/// additively, each sponsor's share is a fixed fraction of the pool no
-/// matter how many intervening `allocate` / `release_issue` (and, once the
-/// deallocate issue lands, `deallocate`) calls happened between the
-/// deposits and this refund — the remainder to return is simply sliced by
-/// those fixed fractions at refund time.
+/// Refunds each contributor their actual unspent remainder from the
+/// milestone's remaining budget. Each contributor's refund is exactly their
+/// `contribution.remaining` amount, which has been properly tracked through
+/// FIFO deductions during `release_issue` calls. The sum of all `remaining`
+/// values across contributions equals `milestone.remaining_budget`, so all
+/// funds are returned with no dust left in the contract.
 ///
-/// Uses largest-remainder rounding (the same invariant as
-/// `compute_split`): every share is floored first, then the remaining dust
-/// (always strictly less than `contributor_count` units) is granted one
-/// unit at a time to the entry with the largest fractional remainder,
-/// tie-broken by contribution index so the outcome is deterministic and
-/// independent of anything a caller controls. The full `remaining_budget`
-/// is returned, so no dust is stranded in the contract. A single-sponsor
-/// milestone is the degenerate case: contribution 0's amount equals
-/// `total_budget`, so the share is exactly `remaining_budget`.
+/// Before this fix (issue #750), refunds incorrectly used
+/// `remaining_budget * contribution.amount / total_budget`, which unfairly
+/// penalized late contributors by refunding them a share of money that had
+/// already been spent by earlier contributors. The FIFO tracking ensures
+/// each sponsor gets back exactly what wasn't spent from their contribution.
 fn refund_remaining_budget(
     env: &Env,
     milestone_id: u64,
@@ -1211,10 +1232,7 @@ fn refund_remaining_budget(
     let token_client = token::Client::new(env, &milestone.token);
     let contract_address = env.current_contract_address();
 
-    let mut shares: Vec<(Address, i128)> = Vec::new(env);
-    let mut order: Vec<(u32, i128, Address)> = Vec::new(env);
-    let mut allocated: i128 = 0;
-
+    // Refund each contributor their actual unspent remainder
     for i in 0..milestone.contributor_count {
         let contribution_key = DataKey::Contribution(milestone_id, i);
         let contribution: Contribution = env
@@ -1222,44 +1240,13 @@ fn refund_remaining_budget(
             .persistent()
             .get(&contribution_key)
             .ok_or(Error::MilestoneNotFound)?;
-        let numerator = remaining
-            .checked_mul(contribution.amount)
-            .ok_or(Error::ArithmeticOverflow)?;
-        let share = numerator / milestone.total_budget;
-        let remainder = numerator % milestone.total_budget;
-        allocated = allocated
-            .checked_add(share)
-            .ok_or(Error::ArithmeticOverflow)?;
-        shares.push_back((contribution.sponsor.clone(), share));
-        order.push_back((order.len(), remainder, contribution.sponsor));
-    }
-
-    let dust = remaining
-        .checked_sub(allocated)
-        .ok_or(Error::ArithmeticOverflow)?;
-    if dust > 0 {
-        mergefi_common::sort_remainders_desc(&mut order);
-        let dust = u32::try_from(dust).map_err(|_| Error::ArithmeticOverflow)?;
-        for k in 0..dust {
-            let (index, _, _) = order.get(k).unwrap();
-            let (recipient, share) = shares.get(index).unwrap();
-            shares.set(
-                index,
-                (
-                    recipient,
-                    share.checked_add(1).ok_or(Error::ArithmeticOverflow)?,
-                ),
-            );
-        }
-    }
-
-    for (recipient, share) in shares.iter() {
-        if share > 0 {
-            token_client.transfer(&contract_address, &recipient, &share);
+        
+        if contribution.remaining > 0 {
+            token_client.transfer(&contract_address, &contribution.sponsor, &contribution.remaining);
             MilestoneRefundPaid {
                 milestone_id,
-                sponsor: recipient,
-                amount: share,
+                sponsor: contribution.sponsor,
+                amount: contribution.remaining,
             }
             .publish(env);
         }

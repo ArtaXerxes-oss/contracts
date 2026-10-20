@@ -726,24 +726,42 @@ fn test_deallocate_requires_admin_auth() {
 }
 
 #[test]
-fn test_deallocate_blocked_while_paused() {
+fn test_deallocate_allowed_while_paused_for_sponsor_protection() {
+    // Verifies fix for issue #752: deallocate must be allowed while paused
+    // so sponsors can recover allocated-but-unreleased funds during a pause.
+    // Demonstrates the sponsor-protective path: deallocate → cancel_milestone → refund.
     let env = Env::default();
     env.mock_all_auths();
     let (_admin, _treasury, client) = setup(&env);
 
     let token_admin = Address::generate(&env);
-    let (token_addr, asset_client, _token_client) = create_token(&env, &token_admin);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
     let sponsor = Address::generate(&env);
-    asset_client.mint(&sponsor, &10_000_000_000i128);
-    client.create_milestone(&95u64, &sponsor, &token_addr, &10_000_000_000i128, &1_000u64);
-    client.allocate(&95u64, &950u64, &1_000_000_000i128);
+    asset_client.mint(&sponsor, &10_000i128);
+    
+    // Create milestone and allocate funds to an issue
+    client.create_milestone(&95u64, &sponsor, &token_addr, &10_000i128, &1_000u64);
+    client.allocate(&95u64, &950u64, &6_000i128);
+    
+    let milestone = client.get_milestone(&95u64);
+    assert_eq!(milestone.total_budget, 10_000i128);
+    assert_eq!(milestone.remaining_budget, 4_000i128);  // 10000 - 6000 allocated
 
+    // Contract is paused due to emergency
     client.pause();
-    let result = client.try_deallocate(&95u64, &950u64);
-    assert_eq!(result, Err(Ok(Error::ContractPaused)));
-
-    client.unpause();
+    
+    // Sponsor wants to recover funds during pause. Deallocate must work
+    // to move allocated funds back to remaining_budget.
     client.deallocate(&95u64, &950u64);
+    
+    let milestone = client.get_milestone(&95u64);
+    assert_eq!(milestone.remaining_budget, 10_000i128);  // 4000 + 6000 back from deallocation
+    
+    // Now sponsor can recover via cancel_milestone (also allowed while paused)
+    client.cancel_milestone(&95u64);
+    
+    // Sponsor got their full 10_000 back
+    assert_eq!(token_client.balance(&sponsor), 10_000i128);
 }
 
 #[test]
@@ -881,6 +899,82 @@ fn test_contribute_grows_pool_and_remaining_budget() {
     assert_eq!(milestone.remaining_budget, 1_500i128);
     // Since the sponsor is the same (alice), contributor_count stays at 1.
     assert_eq!(milestone.contributor_count, 1);
+}
+
+#[test]
+fn test_late_contributor_refund_correctness() {
+    // This test demonstrates the fix for issue #750: A late contributor who
+    // joins after some funds have already been released should get back their
+    // full contribution (minus any releases drawn from it via FIFO), not a
+    // pro-rata share based on total_budget that includes already-spent funds.
+    //
+    // Scenario: A creates milestone with 100, then 90 is released to contributors.
+    // B then contributes 100. On cancel, remaining = 110.
+    // 
+    // BEFORE FIX (WRONG): Each gets (remaining * contribution / total_budget)
+    //   A gets: 110 * 100 / 200 = 55
+    //   B gets: 110 * 100 / 200 = 55
+    //   Result: B loses 45, A gets back 45 that was already spent on A's behalf.
+    //
+    // AFTER FIX (CORRECT): FIFO tracking of contribution.remaining
+    //   A's remaining after 90 release: 100 - 90 = 10
+    //   B's remaining (nothing spent yet): 100
+    //   A gets: 10
+    //   B gets: 100
+    //   Result: Each sponsor gets back exactly their unspent remainder.
+    
+    let env = Env::default();
+    env.mock_all_auths();
+    let (_admin, _treasury, client) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let (token_addr, asset_client, token_client) = create_token(&env, &token_admin);
+
+    let sponsor_a = Address::generate(&env);
+    let sponsor_b = Address::generate(&env);
+    asset_client.mint(&sponsor_a, &100i128);
+    asset_client.mint(&sponsor_b, &100i128);
+
+    // Sponsor A opens the milestone with 100
+    client.create_milestone(&100u64, &sponsor_a, &token_addr, &100i128, &1_000u64);
+
+    let milestone = client.get_milestone(&100u64);
+    assert_eq!(milestone.total_budget, 100i128);
+    assert_eq!(milestone.remaining_budget, 100i128);
+
+    // Allocate and release 90 from A's contribution (FIFO deduction from contribution 0)
+    client.allocate(&100u64, &1001u64, &90i128);
+    let maintainer = Address::generate(&env);
+    client.release_issue(&100u64, &1001u64, &vec![&env, (maintainer, 10_000u32)]);
+
+    // After release, remaining_budget = 10
+    let milestone = client.get_milestone(&100u64);
+    assert_eq!(milestone.remaining_budget, 10i128);
+
+    // NOW sponsor B contributes 100
+    client.contribute(&100u64, &sponsor_b, &100i128);
+
+    let milestone = client.get_milestone(&100u64);
+    assert_eq!(milestone.total_budget, 200i128);  // 100 + 100
+    assert_eq!(milestone.remaining_budget, 110i128); // 10 + 100
+    assert_eq!(milestone.contributor_count, 2);
+
+    // Check contribution.remaining values
+    let contrib_a = client.get_contribution(&100u64, &0);
+    let contrib_b = client.get_contribution(&100u64, &1);
+    assert_eq!(contrib_a.amount, 100i128);      // A originally contributed 100
+    assert_eq!(contrib_a.remaining, 10i128);    // 90 was spent via FIFO
+    assert_eq!(contrib_b.amount, 100i128);      // B contributed 100
+    assert_eq!(contrib_b.remaining, 100i128);   // Nothing spent from B yet
+
+    // Cancel the milestone and verify correct refunds
+    client.cancel_milestone(&100u64);
+
+    // A should get back only their unspent 10 (not 55 under old bug)
+    // B should get back their full 100 (not 55 under old bug)
+    assert_eq!(token_client.balance(&sponsor_a), 10i128);
+    assert_eq!(token_client.balance(&sponsor_b), 100i128);
+    assert_eq!(client.get_milestone(&100u64).remaining_budget, 0);
 }
 
 #[test]

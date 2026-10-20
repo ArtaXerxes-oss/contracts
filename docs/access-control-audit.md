@@ -68,7 +68,7 @@ signature requirement on any particular address.
 | `get_version` | Permissionless (view) | n/a | none | Match (new function) |
 | `set_oracle` | Admin-only | n/a | `require_admin(...).require_auth()` + `new_oracle.require_auth()` | Match (new function) |
 | `set_fee_bps` | Admin-only | n/a | `require_admin(...).require_auth()` | Match (new function) |
-| `deallocate` | Admin-only | n/a | `require_admin(...).require_auth()`; **not pause-gated** (unlike `allocate`/`release_issue`) — a pause-gating inconsistency tracked separately | Match (new function) |
+| `deallocate` | Admin-only | n/a | `require_admin(...).require_auth()`; **intentionally not pause-gated** (unlike `allocate`/`release_issue`) — deallocate is sponsor-protective (moves funds toward refund), so it remains available during pause per design principle 1 (issue #752) | Match (new function) |
 | `cancel_milestone_after_deadline` | Permissionless after `deadline + GRACE_PERIOD` (deliberate) | n/a | none; rejects with `DeadlineNotPassed` before then | Match (new function) |
 | `get_max_sponsors` | Permissionless (view) | n/a | none | Match (new function) |
 | `get_oracle` | Permissionless (view) | n/a | none | Match (new function) |
